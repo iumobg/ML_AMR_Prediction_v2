@@ -1,0 +1,271 @@
+# METHODOLOGY.md — ML_AMR_Prediction_v2
+
+> **A rigorous technical exposition of the biological, mathematical, and statistical foundations of the AMR prediction pipeline.**
+
+---
+
+## Table of Contents
+
+1. [Biological Foundations](#1-biological-foundations)
+2. [Feature Space Mathematics: The Curse of Dimensionality](#2-feature-space-mathematics-the-curse-of-dimensionality)
+3. [Statistical & ML Architecture](#3-statistical--ml-architecture)
+   - [3.1 Binary Histogram Quantization (`max_bin = 2`)](#31-binary-histogram-quantization-max_bin--2)
+   - [3.2 Optuna HPO and the Square Root Heuristic](#32-optuna-hpo-and-the-square-root-heuristic)
+   - [3.3 Stratified Linspace Chunk Selection](#33-stratified-linspace-chunk-selection)
+   - [3.4 Epoch-Based Incremental Learning](#34-epoch-based-incremental-learning)
+
+---
+
+## 1. Biological Foundations
+
+### 1.1 Whole-Genome Sequencing (WGS)
+
+Whole-Genome Sequencing (WGS) is the process of determining the complete nucleotide sequence of an organism's genome in a single laboratory run. For bacterial samples, modern short-read platforms (e.g., Illumina) produce millions of reads — short DNA fragments of 150–300 base pairs — that are assembled into a draft genome. The result is a FASTA file representing the full genetic blueprint of a bacterial isolate.
+
+In the context of Antimicrobial Resistance (AMR), the key insight is:
+
+> **Resistance is encoded in the genome.** Whether a bacterium survives exposure to an antibiotic is determined by specific mutations, insertions, deletions, or acquired horizontal gene transfer events — all of which are directly observable in the WGS data.
+
+### 1.2 K-mers as Alignment-Free Genomic Features
+
+#### Definition
+
+A **k-mer** is any contiguous subsequence of length $k$ extracted from a DNA string. For a genome of length $L$, the number of k-mers is:
+
+$$N_{\text{kmers}} = L - k + 1$$
+
+For a typical bacterial genome of $L \approx 5 \times 10^6$ bp and $k = 21$:
+
+$$N_{\text{kmers}} \approx 5{,}000{,}000 - 21 + 1 \approx 4.999 \times 10^6$$
+
+#### Canonical K-mers
+
+DNA is double-stranded. For any k-mer on the forward strand, its **reverse complement** appears on the reverse strand encoding the same biological sequence. To avoid redundancy, we use **canonical k-mers**: the lexicographically smaller of a k-mer and its reverse complement:
+
+$$k_{\text{canonical}} = \min(k, \overline{k})$$
+
+where $\overline{k}$ denotes the reverse complement of $k$.
+
+#### Why $k = 21$?
+
+The choice $k = 21$ is biologically and statistically motivated:
+
+| Criterion | Value for $k=21$ |
+|-----------|-----------------|
+| Uniqueness probability (random genome) | $\approx 1 - e^{-L/4^k} \approx 1 - e^{-1.19 \times 10^{-6}} \approx 0$ (near-unique) |
+| Sensitivity to single-nucleotide mutations | One SNP generates $k$ altered k-mers |
+| Ability to span a resistance gene codon | 21 bp covers 7 codons — sufficient for most AMR-relevant mutations |
+
+#### From K-mers to AMR Features — Without Alignment
+
+Traditional AMR pipelines (e.g., ARIBA, ResFinder) require alignment of reads to a reference database of known resistance genes. This approach has critical limitations:
+- It misses **novel resistance mutations** not catalogued in databases.
+- It is sensitive to reference quality and database completeness.
+
+Our approach is **alignment-free**: we treat every genome as a **bag of k-mers** and learn which k-mers co-occur with resistance directly from phenotypic labels. Any resistance-conferring SNP, insertion, or deletion creates a unique set of k-mers that do not appear in susceptible genomes — and the XGBoost model discovers this signal in the high-dimensional k-mer space.
+
+---
+
+## 2. Feature Space Mathematics: The Curse of Dimensionality
+
+### 2.1 Theoretical Feature Space
+
+The DNA alphabet is $\Sigma = \{A, C, G, T\}$, so $|\Sigma| = 4$. The total number of distinct k-mers over this alphabet is:
+
+$$|\mathcal{F}| = 4^k$$
+
+For $k = 21$:
+
+$$|\mathcal{F}_{21}| = 4^{21} = 2^{42} \approx 4.398 \times 10^{12}$$
+
+Accounting for canonical k-mers (which halve the space):
+
+$$|\mathcal{F}_{21}^{\text{canonical}}| = \frac{4^{21} + 4^{\lceil 21/2 \rceil}}{2} \approx 2.2 \times 10^{12}$$
+
+This is a ~2.2 trillion dimensional feature space.
+
+### 2.2 The Observed Feature Space: Sparsity
+
+In practice, only a small fraction of this theoretical space is observed across real bacterial genomes. Given a dataset of $n$ genomes (isolates), the observed feature matrix $X \in \{0, 1\}^{n \times p}$ has:
+
+- **Rows** = individual bacterial genomes ($n$ samples)
+- **Columns** = unique k-mers ever observed in any genome ($p$ features)
+- **Values** = binary presence/absence indicator
+
+For a typical AMR dataset:
+
+$$n \sim 10^2\text{–}10^3 \quad \text{and} \quad p \sim 10^6\text{–}10^7$$
+
+This establishes a severe **$p \gg n$ regime** (ultra-high dimensional, small-sample setting).
+
+### 2.3 Sparsity Structure
+
+The matrix $X$ is extremely sparse. Empirically, for $k = 21$:
+
+$$\text{Sparsity} = 1 - \frac{\text{nnz}(X)}{n \cdot p} \approx 0.97\text{–}0.999$$
+
+This is exploited by storing $X$ in **Compressed Sparse Row (CSR)** format (SciPy `csr_matrix`), which stores only the non-zero entries:
+
+$$\text{Storage}_{\text{CSR}} = \mathcal{O}(\text{nnz}(X))$$
+
+compared to a dense matrix requiring $\mathcal{O}(n \cdot p)$ bytes. For our problem, this represents a **100x–1000x memory reduction**.
+
+### 2.4 Prevalence Filtering and Matrix Dimensionality Reduction
+
+Before model training, uninformative k-mers are removed by filtering features based on prevalence across genomes. A k-mer present in all genomes carries no discriminative signal (provides no variance), as does one present in none. Formally, for feature $j$:
+
+$$\text{keep}_j = \mathbf{1}\left[ \epsilon < \frac{\sum_{i=1}^{n} X_{ij}}{n} < 1 - \epsilon \right]$$
+
+where $\epsilon$ is a small threshold (e.g., $\epsilon = 0.001$). This reduces $p$ from tens of millions to a more manageable but still very large set of informative, discriminative features.
+
+---
+
+## 3. Statistical & ML Architecture
+
+### 3.1 Binary Histogram Quantization (`max_bin = 2`)
+
+XGBoost's histogram-based tree learning algorithm discretizes continuous features into bins before split finding. For a dense continuous feature, a typical default setting is `max_bin = 256`, creating 256 potential split points per feature and storing an 8-bit histogram.
+
+Our k-mer features are **binary** ($X_{ij} \in \{0, 1\}$). A binary feature has only one meaningful split point: $X_{ij} < 0.5$ (i.e., absent) vs. $X_{ij} \geq 0.5$ (i.e., present). Therefore, we set:
+
+$$\texttt{max\_bin} = 2$$
+
+This has a profound impact on memory:
+
+**Memory per feature in XGBoost histogram:**
+
+| `max_bin` | Bits per bin | Total bits/feature |
+|-----------|-------------|-------------------|
+| 256 | 8 bits | 8 × 256 = 2048 bits |
+| 2 | 1 bit | 1 × 2 = 2 bits |
+
+**Memory reduction factor:**
+
+$$\frac{\text{Memory}_{256}}{\text{Memory}_{2}} = \frac{256}{2} = 128\times$$
+
+For $p = 5 \times 10^6$ features, this reduces histogram memory from ~1.28 GB to ~10 MB per tree node — a critical enabler for training on an 8 GB machine.
+
+### 3.2 Optuna HPO and the Square Root Heuristic
+
+#### Hyperparameter Optimization Framework
+
+Optuna performs **Bayesian optimization** using a Tree-structured Parzen Estimator (TPE). For each trial $t$ with parameters $\boldsymbol{\theta}_t$, Optuna fits a probabilistic model over the objective function $f(\boldsymbol{\theta})$ (validation AUC-ROC) and proposes the next trial by maximizing the **Expected Improvement (EI)**:
+
+$$\boldsymbol{\theta}_{t+1} = \arg\max_{\boldsymbol{\theta}} \text{EI}(\boldsymbol{\theta}) = \mathbb{E}\left[\max(f(\boldsymbol{\theta}) - f^*, 0)\right]$$
+
+where $f^*$ is the current best observed value.
+
+#### The Square Root Heuristic for Feature Subsampling
+
+In the $p \gg n$ setting, selecting all $p$ features per tree split is both computationally prohibitive and statistically harmful (overfitting). A well-established heuristic from random forests suggests using $m \approx \sqrt{p}$ features per split. In XGBoost's `colsample_bytree` parameter, this is expressed as a fraction:
+
+$$\texttt{colsample\_bytree} = \frac{m}{p} = \frac{\sqrt{p}}{p} = \frac{1}{\sqrt{p}} = p^{-1/2}$$
+
+For $p = 5 \times 10^6$:
+
+$$\texttt{colsample\_bytree} = \frac{1}{\sqrt{5 \times 10^6}} \approx \frac{1}{2236} \approx 4.5 \times 10^{-4}$$
+
+This means each tree sees only ~0.045% of features — a massive regularization effect that simultaneously reduces computation from $\mathcal{O}(p \cdot n)$ per split to $\mathcal{O}(\sqrt{p} \cdot n)$.
+
+#### Early Stopping for `n_estimators`
+
+Rather than letting Optuna randomly search over `n_estimators`, we **fix `num_boost_round = 1000`** and use XGBoost's built-in early stopping (patience = `early_stopping_rounds`). The optimal number of trees is determined empirically:
+
+$$n_{\text{trees}}^* = \arg\min_{t \leq 1000} \mathcal{L}_{\text{val}}(t)$$
+
+This is captured from `model.best_iteration` and stored as a trial user attribute, then merged into the final configuration. This prevents the Optuna anti-pattern of **random search conflicting with early stopping**, which otherwise leads to overfitting via the selection of unnecessarily large `n_estimators`.
+
+### 3.3 Stratified Linspace Chunk Selection
+
+#### Problem: Imbalanced Mini-Batches
+
+When the full dataset is stored in $C$ chunks on disk and the model is trained on a subset of $k < C$ chunks per trial, naive random chunk selection risks drawing a subset with:
+- All resistant samples (minority class dominates)
+- Almost no resistant samples (majority class dominates)
+
+This creates **biased gradient updates** that misrepresent the true class distribution.
+
+#### Solution: Stratified Linspace Sampling
+
+Each chunk $c$ has an associated **resistance ratio**:
+
+$$r_c = \frac{|\{i \in c : y_i = 1\}|}{|c|}$$
+
+To select $k$ chunks that collectively preserve the global resistance ratio $\bar{r}$, we sort chunks by $r_c$ and select indices using `numpy.linspace`:
+
+$$\text{selected\_indices} = \text{round}\left(\text{linspace}(0,\, C-1,\, k)\right)$$
+
+applied to the **sorted** array of $(c, r_c)$ pairs. This ensures selected chunks are spread uniformly across the resistance distribution, providing a balanced sample regardless of which $k$ chunks are selected.
+
+**Formal property:** Let $S = \{c_1, \ldots, c_k\}$ be the selected chunks with resistance ratios $\{r_{c_1}, \ldots, r_{c_k}\}$. The stratified selection minimizes:
+
+$$\left| \frac{1}{k} \sum_{j=1}^{k} r_{c_j} - \bar{r} \right|$$
+
+compared to random selection, by ensuring the selected ratios span the full observed range of $r_c$ values.
+
+### 3.4 Epoch-Based Incremental Learning
+
+#### Problem: Catastrophic Forgetting in Sequential Learning
+
+Standard XGBoost `train()` with `xgb_model` (warm-starting) allows incremental tree addition. However, if chunks are always presented in the **same order**, the model successively updates gradients on each chunk — effectively overwriting knowledge from earlier chunks with signal from the most recently seen chunk. This is analogous to **catastrophic forgetting** in neural network sequential learning.
+
+Specifically: if chunks $\{1, 2, \ldots, C\}$ are always trained in this order, the final gradient updates predominantly reflect the distribution of chunk $C$, biasing predictions toward isolates in the tail of the dataset.
+
+#### Solution: Epoch-Based Shuffled Training
+
+We define an **epoch** as a complete pass through all $C$ training chunks. Over $E$ epochs, we perform $E \times C$ incremental `xgb.train()` calls with `num_boost_round = 1` each time, shuffling the chunk order at the beginning of every epoch.
+
+The training sequence across epochs is:
+
+$$\text{Epoch 1: } \pi^{(1)}(1),\, \pi^{(1)}(2),\, \ldots,\, \pi^{(1)}(C)$$
+$$\text{Epoch 2: } \pi^{(2)}(1),\, \pi^{(2)}(2),\, \ldots,\, \pi^{(2)}(C)$$
+$$\vdots$$
+$$\text{Epoch } E: \pi^{(E)}(1),\, \pi^{(E)}(2),\, \ldots,\, \pi^{(E)}(C)$$
+
+where $\pi^{(e)}$ is a random permutation of $\{1, \ldots, C\}$ drawn independently for each epoch $e$.
+
+#### Why This Prevents Forgetting
+
+The gradient boosting objective at tree-building step $t$ is:
+
+$$\mathcal{L}^{(t)} = \sum_{i=1}^{n_{\text{chunk}}} \ell\left(y_i,\, \hat{y}_i^{(t-1)} + f_t(x_i)\right) + \Omega(f_t)$$
+
+Each new tree $f_t$ is fit to the **residuals of the current ensemble** on the **current mini-batch**. The key insight is:
+
+> **XGBoost's additive structure is not overwritten.** Previously added trees $\{f_1, \ldots, f_{t-1}\}$ are immutable. New trees $f_t$ correct their mistakes on whatever batch is currently shown.
+
+Shuffling ensures that over $E$ epochs, each chunk appears in every possible ordinal position in the training sequence, guaranteeing that:
+
+1. **No systematic positional bias** is introduced — no chunk systematically dominates late-stage gradient updates.
+2. **Every genomic region** (different chunks may contain genomes from different collection sites or clades) contributes equally to refining the ensemble.
+3. **Convergence stability** improves: the learning rate schedule effectively sees a smoothed gradient signal averaged across the shuffled chunk order.
+
+#### Total Trees and Learning Rate
+
+With $E$ epochs, $C$ chunks, and 1 tree per chunk per epoch:
+
+$$T_{\text{total}} = E \times C$$
+
+The effective learning rate per epoch is $\eta$ (XGBoost `learning_rate`), which must be chosen small enough that the ensemble does not overfit within a single chunk pass. The standard recommendation is:
+
+$$\eta \leq \frac{1}{\sqrt{T_{\text{total}}}}$$
+
+ensuring the cumulative update magnitude scales appropriately with the number of boosting rounds.
+
+---
+
+## Summary of Design Decisions
+
+| Component | Problem Solved | Technical Solution |
+|-----------|---------------|-------------------|
+| k-mer features, $k=21$ | Alignment-free genomic representation | Canonical 21-mer presence/absence vectors |
+| CSR sparse matrix + `.npz` chunks | $p \gg n$ high-dimensional sparsity | SciPy CSR format; chunked disk storage |
+| `max_bin = 2` | RAM exhaustion from large histograms | 1-bit histograms for binary features (128× reduction) |
+| `colsample_bytree = 1/√p` | Overfitting + computational cost | Square Root Heuristic for column subsampling |
+| Optuna TPE + early stopping | Conflicting HPO and early stopping | Fixed `num_boost_round`; `best_iteration` captured |
+| Stratified linspace chunk selection | Biased mini-batch resistance ratios | Sorted-by-ratio linspace chunk indexing |
+| Epoch-based shuffled training | Catastrophic forgetting in sequential learning | Per-epoch random permutation of chunk order |
+
+---
+
+*Document version: March 2026. Maintained alongside `scripts/` as the canonical mathematical reference for the pipeline.*
