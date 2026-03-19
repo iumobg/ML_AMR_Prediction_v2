@@ -1,0 +1,736 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+XGBoost Hyperparameter Optimization Module for AMR Prediction
+
+This script performs automated hyperparameter tuning using Optuna to optimize
+XGBoost model performance for antimicrobial resistance (AMR) prediction.
+
+Key Features:
+    1. Smart Chunk Selection: Uses a subset of training data to reduce RAM usage
+       while maintaining representative samples for hyperparameter optimization
+    2. Bayesian Optimization: Employs Optuna's Tree-structured Parzen Estimator (TPE)
+       to efficiently explore the hyperparameter space
+    3. Early Stopping: Prevents overfitting during trial evaluations
+    4. Cross-platform Compatibility: Uses pathlib for universal path handling
+
+Smart Chunk Selection Strategy:
+    Instead of loading all training data (which may exceed RAM), we select N chunks
+    (optuna_chunk_count from config.yaml) using a stratified linspace approach:
+    - Chunks are sorted from highest to lowest resistance ratio
+    - N chunks are selected at evenly spaced intervals to represent the entire spectrum
+    
+    This strategy ensures:
+    - Comprehensive representation of the resistance spectrum (hard, medium, easy)
+    - Prevents RAM exhaustion by limiting optimization dataset size
+    - Faster iteration during hyperparameter search
+
+Hyperparameter Search Space:
+    - learning_rate: [0.01, 0.3] - Controls gradient descent step size
+    - max_depth: [3, 12] - Maximum tree depth to prevent overfitting
+    - subsample: [0.6, 1.0] - Fraction of samples used per tree
+    - colsample_bytree: [0.6, 1.0] - Fraction of features used per tree
+    - min_child_weight: [1, 10] - Minimum sum of instance weight in child node
+    - gamma: [0, 5] - Minimum loss reduction for further partition
+    - scale_pos_weight: [1.0, 10.0] - Balances positive/negative weights
+    - n_estimators: [100, 600] - Number of boosting rounds
+"""
+
+# ============================================================================
+# LIBRARY IMPORTS
+# ============================================================================
+import pandas as pd
+import numpy as np
+import xgboost as xgb
+import optuna
+import yaml
+import joblib
+from pathlib import Path
+from scipy.sparse import load_npz, vstack
+from sklearn.model_selection import train_test_split
+import sys
+
+
+# ============================================================================
+# LOAD CONFIGURATION FROM YAML
+# ============================================================================
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+CONFIG_DIR = PROJECT_ROOT / "config"
+CONFIG_FILE = CONFIG_DIR / "config.yaml"
+
+# Load configuration
+if not CONFIG_FILE.exists():
+    raise FileNotFoundError(
+        f"Configuration file not found: {CONFIG_FILE}\n"
+        f"Please ensure config.yaml exists in the config/ directory."
+    )
+
+with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+    config = yaml.safe_load(f)
+
+# Extract configuration values
+TARGET_ANTIBIOTIC = config['project']['target_antibiotic']
+CHUNK_SIZE = config['preprocessing']['chunk_size']
+
+# Load fractional splitting parameters (fallback to defaults if undefined)
+TEST_FRACTION = float(config['training'].get('test_fraction', 0.20))
+OPTUNA_FRACTION = float(config['training'].get('optuna_fraction', 0.25))
+
+RANDOM_SEED = config['training']['random_seed']
+N_TRIALS = config['training']['n_trials']
+VAL_SPLIT = config['training']['validation_fraction']
+EARLY_STOPPING_ROUNDS = config['xgboost_params']['early_stopping_rounds']
+
+# XGBoost base parameters (fetched from config)
+BASE_PARAMS = {
+    'objective': config['xgboost_params'].get('objective', 'binary:logistic'),
+    'eval_metric': config['xgboost_params'].get('eval_metric', 'auc'),
+    'tree_method': config['xgboost_params'].get('tree_method', 'hist'),
+    'nthread': config['xgboost_params'].get('n_jobs', -1),
+    'device': config['xgboost_params'].get('device', 'cpu'),
+    'random_state': RANDOM_SEED,
+    'verbosity': config['xgboost_params'].get('verbosity', 0),
+    'max_bin': 2  # CRITICAL RAM FIX: 0/1 binary data does not need 256 bins!
+}
+
+# Cross-platform paths using pathlib
+BASE_DIR = PROJECT_ROOT / "data"
+
+# Antibiotic-specific paths
+ANTIBIOTIC_DIR = BASE_DIR / TARGET_ANTIBIOTIC
+MATRIX_DIR = ANTIBIOTIC_DIR / "matrix"
+
+# Output directories (antibiotic-specific)
+MODELS_DIR = PROJECT_ROOT / "models" / TARGET_ANTIBIOTIC
+LOGS_DIR = PROJECT_ROOT / "logs" / TARGET_ANTIBIOTIC
+
+# Create output directories
+MODELS_DIR.mkdir(parents=True, exist_ok=True)
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
+def get_y_chunk(y_all, chunk_id, chunk_size, total_len):
+    """
+    Extract label subset for a specific data chunk.
+    
+    Args:
+        y_all: Complete array of all labels
+        chunk_id: Chunk identifier (0-indexed)
+        chunk_size: Number of samples per chunk
+        total_len: Total number of samples
+    
+    Returns:
+        Subset of labels corresponding to the specified chunk
+    """
+    start = chunk_id * chunk_size
+    end = min((chunk_id + 1) * chunk_size, total_len)
+    return y_all[start:end]
+
+
+def analyze_and_stratify_all_chunks(y_all, all_files, chunk_size, test_fraction, optuna_fraction):
+    """
+    Analyze all chunks and perform stratified train/test split using resistance ratio.
+    
+    Dynamic Stratified Splitting Strategy (Scale-Invariant Fractional Method):
+        This function implements a robust, data-driven splitting approach that ensures
+        representative sampling across the resistance spectrum. Unlike static chunk counts,
+        using fractions prevents crashes or statistical anomalies when chunk_size changes.
+    
+    Stratification Algorithm:
+        Step 1: Calculate resistance ratio for each chunk (resistant / total)
+        Step 2: Sort chunks from highest to lowest resistance (hard → easy)
+        Step 3: Calculate dynamic chunk counts: N_test = max(1, floor(total * test_fraction))
+        Step 4: Select N_test chunks using np.linspace for representative sampling
+                - Ensures test set includes hard, medium, and easy cases
+                - Maintains population distribution fidelity
+        Step 5: Remaining chunks form training pool
+        Step 6: Select Optuna subset (N_optuna = max(1, floor(train_total * optuna_fraction))) 
+                from training pool for evaluation
+    
+    Why Fractional Stratification Matters:
+        - Prevents bias: Random splits may over-represent easy/hard cases
+        - Generalization: Model tested on full difficulty spectrum
+        - Clinical validity: Real-world deployment faces all resistance levels
+        - Scale-Invariant: Works seamlessly whether there are 10 chunks or 10,000 chunks
+    
+    Args:
+        y_all: Complete label array for all samples
+        all_files: List of ALL available chunk file paths
+        chunk_size: Number of samples per chunk
+        test_fraction: Fraction of all chunks to reserve for testing (e.g., 0.20)
+        optuna_fraction: Fraction of training chunks to allocate for Optuna optimization (e.g., 0.25)
+    
+    Returns:
+        tuple: (train_files, train_filenames, test_files, test_filenames, optuna_files, optuna_filenames)
+            - train_files: Chunks for model training (excluding test)
+            - test_files: Representative test set (stratified)
+            - optuna_files: Subset for hyperparameter optimization (N representative chunks)
+    """
+    print("\n" + "=" * 80)
+    print("DYNAMIC STRATIFIED DATA SPLITTING")
+    print("=" * 80)
+    print("Strategy: Representative sampling across resistance spectrum")
+    print("=" * 80)
+    
+    # Analyze each chunk's resistance characteristics
+    chunk_stats = []
+    
+    print("\n[Phase 1/4] Analyzing resistance distribution...")
+    for f in all_files:
+        chunk_num = int(f.stem.split('_')[-1])
+        y_chunk = get_y_chunk(y_all, chunk_num, chunk_size, len(y_all))
+        
+        pos_count = sum(y_chunk)
+        total_count = len(y_chunk)
+        ratio = pos_count / total_count if total_count > 0 else 0
+        
+        chunk_stats.append({
+            'file': f,
+            'filename': f.name,
+            'id': chunk_num,
+            'pos_count': pos_count,
+            'total': total_count,
+            'ratio': ratio
+        })
+    
+    # Sort by resistance ratio (descending: hardest → easiest)
+    df_stats = pd.DataFrame(chunk_stats).sort_values(by='ratio', ascending=False).reset_index(drop=True)
+    
+    print("\n[Phase 2/4] Resistance spectrum analysis:")
+    print("-" * 80)
+    print(f"{'Rank':<6} | {'Chunk ID':<10} | {'Resistant':<12} | {'Total':<10} | {'Ratio':<10}")
+    print("-" * 80)
+    for idx, row in df_stats.head(5).iterrows():
+        print(f"{idx+1:<6} | {row['id']:<10} | {row['pos_count']:<12} | {row['total']:<10} | {row['ratio']:<10.4f}")
+    print("...")
+    for idx, row in df_stats.tail(2).iterrows():
+        print(f"{idx+1:<6} | {row['id']:<10} | {row['pos_count']:<12} | {row['total']:<10} | {row['ratio']:<10.4f}")
+    print("-" * 80)
+    
+    # Validate and calculate fractional test chunks
+    total_chunks = len(df_stats)
+    test_chunks = max(1, int(np.floor(total_chunks * test_fraction)))
+    
+    if test_chunks >= total_chunks:
+        print(f"\n⚠ WARNING: Calculated test chunks ({test_chunks}) >= total chunks ({total_chunks})")
+        test_chunks = max(1, total_chunks - 2)  # Leave at least 2 for training
+        print(f"  Auto-adjusted to: {test_chunks} test chunks")
+    
+    # Stratified test set selection using linspace (representative sampling)
+    print(f"\n[Phase 3/4] Selecting {test_chunks} representative test chunks (Target fraction: {test_fraction:.1%})...")
+    test_indices = np.linspace(0, total_chunks - 1, test_chunks, dtype=int)
+    test_files = df_stats.iloc[test_indices]['file'].tolist()
+    test_filenames = df_stats.iloc[test_indices]['filename'].tolist()
+    
+    print("Test set composition (stratified across difficulty):")
+    print("-" * 80)
+    for idx, test_idx in enumerate(test_indices):
+        row = df_stats.iloc[test_idx]
+        difficulty = "HARD" if row['ratio'] > 0.6 else "MEDIUM" if row['ratio'] > 0.3 else "EASY"
+        print(f"  {idx+1}. {row['filename']:<30} | Ratio: {row['ratio']:.4f} | {difficulty}")
+    print("-" * 80)
+    
+    # Training pool: all chunks NOT in test set
+    train_mask = ~df_stats['file'].isin(test_files)
+    train_files = df_stats[train_mask]['file'].tolist()
+    train_filenames = df_stats[train_mask]['filename'].tolist()
+    
+    print(f"\n[Phase 4/4] Training pool: {len(train_files)} chunks")
+    
+    # Select Optuna subset from training pool (stratified by resistance)
+    print("\nSelecting Optuna optimization subset using fractional logic...")
+    train_df_sorted = df_stats[train_mask].reset_index(drop=True)
+    
+    final_optuna_count = max(1, int(np.floor(len(train_df_sorted) * optuna_fraction)))
+    
+    if final_optuna_count > len(train_df_sorted):
+        print(f"  ⚠ WARNING: Calculated Optuna chunks ({final_optuna_count}) exceeds available training chunks ({len(train_df_sorted)}).")
+        print(f"  Auto-adjusting to maximum available: {len(train_df_sorted)}")
+        final_optuna_count = len(train_df_sorted)
+        
+    if final_optuna_count >= 1:
+        # Stratified selection using np.linspace
+        optuna_indices = np.linspace(0, len(train_df_sorted) - 1, final_optuna_count, dtype=int)
+        
+        optuna_files = train_df_sorted.iloc[optuna_indices]['file'].tolist()
+        optuna_filenames = train_df_sorted.iloc[optuna_indices]['filename'].tolist()
+        
+        print(f"Loaded {final_optuna_count} chunks for Optuna based on config (stratified by resistance):")
+        print("-" * 80)
+        for idx_order, idx_val in enumerate(optuna_indices):
+            row = train_df_sorted.iloc[idx_val]
+            difficulty = "HARD" if row['ratio'] > 0.6 else "MEDIUM" if row['ratio'] > 0.3 else "EASY"
+            print(f"  {idx_order+1}. {row['filename']:<30} | Ratio: {row['ratio']:.4f} | {difficulty}")
+        print("-" * 80)
+    else:
+        # Fallback if no training chunks
+        optuna_files = []
+        optuna_filenames = []
+        print("  ⚠ WARNING: No training chunks available for Optuna.")
+    
+    # Statistics
+    total_train_samples = sum([len(get_y_chunk(y_all, int(f.stem.split('_')[-1]), chunk_size, len(y_all))) 
+                               for f in train_files])
+    total_test_samples = sum([len(get_y_chunk(y_all, int(f.stem.split('_')[-1]), chunk_size, len(y_all))) 
+                              for f in test_files])
+    total_optuna_samples = sum([len(get_y_chunk(y_all, int(f.stem.split('_')[-1]), chunk_size, len(y_all))) 
+                                for f in optuna_files])
+    
+    print(f"\n{'='*80}")
+    print("STRATIFIED SPLIT SUMMARY")
+    print(f"{'='*80}")
+    print(f"Total chunks:        {total_chunks}")
+    print(f"Training chunks:     {len(train_files)} ({len(train_files)/total_chunks:.1%})")
+    print(f"Test chunks:         {len(test_files)} ({len(test_files)/total_chunks:.1%})")
+    print(f"Optuna chunks:       {len(optuna_files)} ({len(optuna_files)/len(train_files):.1%} of training)")
+    print("")
+    print(f"Training samples:    {total_train_samples:,}")
+    print(f"Test samples:        {total_test_samples:,}")
+    print(f"Optuna samples:      {total_optuna_samples:,}")
+    print(f"{'='*80}")
+    
+    # Extract filenames for config storage
+    optuna_filenames = [f.name for f in optuna_files]
+    
+    return train_files, train_filenames, test_files, test_filenames, optuna_files, optuna_filenames
+
+
+def load_data_for_optuna(selected_files, y_all, chunk_size):
+    """
+    Load selected chunks and prepare data for Optuna optimization.
+    
+    Splits the selected data into training and validation sets for
+    hyperparameter evaluation. Uses stratified splitting to maintain
+    class balance in both sets.
+    
+    Args:
+        selected_files: List of chunk file paths to load
+        y_all: Complete label array
+        chunk_size: Number of samples per chunk
+    
+    Returns:
+        tuple: (dtrain, dval)
+            - dtrain: XGBoost DMatrix for training
+            - dval: XGBoost DMatrix for validation
+    """
+    print("\nLoading selected chunks into RAM...")
+    
+    X_list = []
+    y_list = []
+    
+    for f in selected_files:
+        try:
+            X_chunk = load_npz(f)
+            chunk_num = int(f.stem.split('_')[-1])
+            y_chunk = get_y_chunk(y_all, chunk_num, chunk_size, len(y_all))
+            
+            X_list.append(X_chunk)
+            y_list.append(y_chunk)
+            
+            print(f"  ✓ Loaded {f.name}: {X_chunk.shape[0]} samples")
+            
+        except Exception as e:
+            print(f"ERROR: Failed to load {f.name}: {e}")
+            sys.exit(1)
+    
+    # Stack all chunks
+    X_opt = vstack(X_list)
+    y_opt = np.concatenate(y_list)
+    
+    print(f"\nTotal optimization data: {X_opt.shape}")
+    print(f"  Resistant: {np.sum(y_opt)} | Susceptible: {len(y_opt) - np.sum(y_opt)}")
+    
+    # Split into train/validation with stratification
+    print(f"\nSplitting into train ({int((1-VAL_SPLIT)*100)}%) and validation ({int(VAL_SPLIT*100)}%)...")
+    
+    # Check if only one class exists (prevents stratification crash)
+    unique_classes = np.unique(y_opt)
+    use_stratify = y_opt if len(unique_classes) > 1 else None
+    
+    if len(unique_classes) == 1:
+        print("  ⚠ WARNING: Only one class found in selected chunks. Stratification disabled.")
+    
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_opt, y_opt, 
+        test_size=VAL_SPLIT, 
+        random_state=RANDOM_SEED, 
+        stratify=use_stratify
+    )
+    
+    print(f"  Train: {X_train.shape} | Val: {X_val.shape}")
+    
+    # Convert to XGBoost DMatrix format
+    print("\nConverting to XGBoost DMatrix format...")
+    dtrain = xgb.DMatrix(X_train, label=y_train)
+    dval = xgb.DMatrix(X_val, label=y_val)
+    
+    print("  ✓ Data preparation complete")
+    
+    return dtrain, dval
+
+
+def save_antibiotic_specific_config(study, base_params, target_antibiotic, config_dir, 
+                                    train_filenames, test_filenames, optuna_filenames):
+    """
+    Save optimization results to antibiotic-specific configuration file.
+    
+    Creates a dedicated YAML configuration file for each antibiotic containing:
+    - Optimization metadata (date, best score, trials)
+    - Fixed base XGBoost parameters
+    - Optimized hyperparameters from Optuna study
+    - Data split information (FULL train set, test set, optuna subset)
+    
+    CRITICAL DISTINCTION:
+        - train_files: FULL training set (all chunks minus test) - for Script 05 final training
+        - test_files: Stratified test set - for Script 06 evaluation
+        - optuna_files: Small subset of train_files - ONLY for hyperparameter tuning (Script 04)
+    
+    This decoupling strategy enables:
+    - Parallel optimization for multiple antibiotics without conflicts
+    - Independent hyperparameter versioning per antibiotic
+    - Reproducible data splits (scripts 05 and 06 use exact same files)
+    - Clear separation between optimization subset and full training set
+    - Clear audit trail of optimization results
+    
+    File Output: config/config_{antibiotic}.yaml
+    
+    Args:
+        study: Completed Optuna study object
+        base_params: Fixed XGBoost parameters (objective, eval_metric, etc.)
+        target_antibiotic: Name of target antibiotic (e.g., 'ciprofloxacin')
+        config_dir: Path to configuration directory
+        train_filenames: List of FULL training chunk filenames (strings) - for Script 05
+        test_filenames: List of test chunk filenames (strings) - for Script 06
+        optuna_filenames: List of optuna subset filenames (strings) - for record only
+    
+    Returns:
+        Path: Path to created configuration file
+    
+    Raises:
+        IOError: If file write operation fails
+    """
+    antibiotic_config_path = config_dir / f"config_{target_antibiotic}.yaml"
+    
+    # Merge standard best params with the dynamically found n_estimators
+    final_best_params = study.best_params.copy()
+    if "n_estimators" in study.best_trial.user_attrs:
+        final_best_params["n_estimators"] = study.best_trial.user_attrs["n_estimators"]
+
+    # Construct configuration data structure
+    model_config = {
+        'antibiotic_metadata': {
+            'target_antibiotic': target_antibiotic,
+            'optimization_date': pd.Timestamp.now().isoformat(),
+            'best_auc_score': float(study.best_value),
+            'n_trials_completed': len(study.trials)
+        },
+        'data_split': {
+            'description': 'Stratified split: FULL train (for 05_model_training.py), test (for 06_evaluation.py), optuna subset (record only)',
+            'split_method': 'linspace_stratified_by_resistance_ratio',
+            'train_files': train_filenames,
+            'test_files': test_filenames,
+            'optuna_files': optuna_filenames,
+            'train_count': len(train_filenames),
+            'test_count': len(test_filenames),
+            'optuna_count': len(optuna_filenames)
+        },
+        'xgboost_params': base_params,
+        'best_params': final_best_params
+    }
+    
+    # Write to antibiotic-specific YAML file
+    with open(antibiotic_config_path, 'w', encoding='utf-8') as f:
+        # Add header comment
+        f.write("# " + "=" * 78 + "\n")
+        f.write("# AUTO-GENERATED CONFIGURATION: {target_antibiotic.upper()}\n")
+        f.write("# " + "=" * 78 + "\n")
+        f.write("# Generated by: 04_optimization.py\n")
+        f.write(f"# Date: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"# Best ROC AUC: {study.best_value:.4f}\n")
+        f.write(f"# Trials: {len(study.trials)}\n")
+        f.write("#\n")
+        f.write("# WARNING: This file is automatically generated. Manual edits will be\n")
+        f.write("#          overwritten when re-running hyperparameter optimization.\n")
+        f.write("# " + "=" * 78 + "\n\n")
+        
+        yaml.dump(model_config, f, default_flow_style=False, sort_keys=False)
+    
+    return antibiotic_config_path
+
+
+def objective(trial, dtrain, dval, base_params):
+    """
+    Optuna objective function for hyperparameter optimization.
+    
+    This function is called by Optuna for each trial. It suggests a set of
+    hyperparameters, trains an XGBoost model, and returns the validation
+    performance metric (ROC AUC) for optimization.
+    
+    Hyperparameter Ranges Explained:
+        - learning_rate [0.01, 0.3]: Lower values more stable but slower
+        - max_depth [3, 12]: Deeper trees can model complex patterns but overfit
+        - subsample [0.6, 1.0]: Using subset of data per tree prevents overfitting
+        - colsample_bytree [0.6, 1.0]: Using subset of features adds diversity
+        - min_child_weight [1, 10]: Higher values more conservative (less overfitting)
+        - gamma [0, 5]: Regularization parameter (minimum loss reduction)
+        - scale_pos_weight [1.0, 10.0]: Addresses class imbalance
+        - n_estimators [100, 600]: More trees improve performance but increase training time
+    
+    Args:
+        trial: Optuna trial object
+        dtrain: XGBoost DMatrix for training
+        dval: XGBoost DMatrix for validation
+        base_params: Fixed XGBoost parameters (objective, eval_metric, etc.)
+    
+    Returns:
+        float: Best validation ROC AUC score achieved during training
+    """
+    # Create parameter dictionary starting with base parameters
+    params = base_params.copy()
+    
+    # Add trial-specific hyperparameters
+    params.update({
+        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+        'max_depth': trial.suggest_int('max_depth', 3, 12),
+        'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.05, 0.3),  # Reduced to 5-30% for 48M features
+        'min_child_weight': trial.suggest_int('min_child_weight', 1, 10),
+        'gamma': trial.suggest_float('gamma', 0, 5),
+        'scale_pos_weight': trial.suggest_float('scale_pos_weight', 1.0, 10.0),
+    })
+    
+    # Train model with early stopping (let XGBoost find the optimal trees)
+    model = xgb.train(
+        params,
+        dtrain,
+        num_boost_round=1000,  # Fixed high ceiling
+        evals=[(dval, "validation")],
+        early_stopping_rounds=EARLY_STOPPING_ROUNDS,
+        verbose_eval=False
+    )
+    
+    # Dynamically save the EXACT optimal tree count found by early stopping
+    trial.set_user_attr("n_estimators", model.best_iteration)
+    
+    # Return best validation score (ROC AUC)
+    return model.best_score
+
+
+def generate_optuna_plots(study, target_antibiotic):
+    """Generate and save Optuna optimization visualizations using matplotlib."""
+    print("\nGenerating Optuna visualization plots...")
+    
+    # Define output directory for ML analysis
+    output_dir = PROJECT_ROOT / "analysis_results" / target_antibiotic / "model_optimization"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    try:
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        from optuna.visualization.matplotlib import plot_optimization_history, plot_param_importances
+        import warnings
+        warnings.filterwarnings('ignore', category=UserWarning)  # Suppress optuna matplotlib experimental warnings
+        
+        # Set style
+        sns.set_theme(style="whitegrid", context="paper", font_scale=1.2)
+        
+        # 1. Optimization History Plot
+        fig1 = plt.figure(figsize=(10, 6))
+        ax1 = plot_optimization_history(study)
+        plt.title(f'Hyperparameter Optimization History ({target_antibiotic.upper()})', fontsize=14, pad=15)
+        plt.tight_layout()
+        hist_path = output_dir / f"01_optuna_history_{target_antibiotic}.png"
+        plt.savefig(hist_path, dpi=300, bbox_inches='tight')
+        plt.close(fig1)
+        print(f"  ✓ Saved history plot: {hist_path.name}")
+        
+        # 2. Hyperparameter Importance Plot
+        fig2 = plt.figure(figsize=(10, 6))
+        ax2 = plot_param_importances(study)
+        plt.title(f'Hyperparameter Importance ({target_antibiotic.upper()})', fontsize=14, pad=15)
+        plt.tight_layout()
+        imp_path = output_dir / f"02_optuna_importance_{target_antibiotic}.png"
+        plt.savefig(imp_path, dpi=300, bbox_inches='tight')
+        plt.close(fig2)
+        print(f"  ✓ Saved importance plot: {imp_path.name}")
+        
+    except ImportError:
+        print("  ⚠ Could not generate plots. Ensure matplotlib is installed.")
+    except Exception as e:
+        print(f"  ⚠ Failed to generate Optuna plots: {e}")
+
+
+# ============================================================================
+# MAIN EXECUTION
+# ============================================================================
+def main():
+    """
+    Execute hyperparameter optimization pipeline.
+    
+    Pipeline:
+        1. Load label data and identify training chunks
+        2. Perform smart chunk selection (memory-efficient subset)
+        3. Load selected chunks into RAM
+        4. Run Optuna optimization (N_TRIALS iterations)
+        5. Save best hyperparameters to JSON file
+        6. Export full study object for further analysis
+    """
+    print("=" * 80)
+    print("XGBOOST HYPERPARAMETER OPTIMIZATION FOR AMR PREDICTION")
+    print("=" * 80)
+    print(f"Target Antibiotic: {TARGET_ANTIBIOTIC}")
+    print(f"Optimization Trials: {N_TRIALS}")
+    print(f"Validation Split: {int(VAL_SPLIT*100)}%")
+    print("=" * 80)
+    
+    # ------------------------------------------------------------------------
+    # STEP 1: Load Data Information
+    # ------------------------------------------------------------------------
+    print("\n[STEP 1/5] Loading data information...")
+    
+    try:
+        # Load labels
+        y_path = MATRIX_DIR / f"y_{TARGET_ANTIBIOTIC}.csv"
+        if not y_path.exists():
+            raise FileNotFoundError(f"Label file not found: {y_path}")
+        
+        y_all = pd.read_csv(y_path, encoding='utf-8')['label'].values
+        print(f"  ✓ Loaded {len(y_all)} labels from {y_path.name}")
+        
+        # Find all matrix chunks
+        all_files = sorted(
+            list(MATRIX_DIR.glob(f"X_{TARGET_ANTIBIOTIC}_part_*.npz")),
+            key=lambda x: int(x.stem.split('_')[-1])
+        )
+        
+        if not all_files:
+            raise FileNotFoundError(
+                f"No matrix chunks found matching: X_{TARGET_ANTIBIOTIC}_part_*.npz"
+            )
+        
+        print(f"  ✓ Found {len(all_files)} matrix chunks")
+        
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}")
+        print("\nPlease ensure you have run:")
+        print("  1. Data validation: 01_data_validation.py")
+        print("  2. K-mer counting: 02_kmer_extraction.py")
+        print("  3. Matrix creation: 03_matrix_construction.py")
+        sys.exit(1)
+    except Exception as e:
+        print(f"ERROR: Unexpected error: {e}")
+        sys.exit(1)
+    
+    # ------------------------------------------------------------------------
+    # STEP 2: Stratified Data Splitting
+    # ------------------------------------------------------------------------
+    # Split data using new fractional strategy
+    print("\n[STEP 2/6] Dynamic Stratified Chunk Splitting...")
+    train_files, train_filenames, test_files, test_filenames, optuna_files, optuna_filenames = analyze_and_stratify_all_chunks(
+        y_all=y_all,
+        all_files=all_files,
+        chunk_size=CHUNK_SIZE,
+        test_fraction=TEST_FRACTION,
+        optuna_fraction=OPTUNA_FRACTION
+    )
+    
+    # ------------------------------------------------------------------------
+    # STEP 3: Prepare Optuna Data
+    # ------------------------------------------------------------------------
+    print("\n[STEP 3/6] Loading data for hyperparameter optimization...")
+    
+    dtrain_opt, dval_opt = load_data_for_optuna(optuna_files, y_all, CHUNK_SIZE)
+    
+    # ------------------------------------------------------------------------
+    # STEP 4: Run Optuna Optimization
+    # ------------------------------------------------------------------------
+    
+    print("\n[STEP 5/5] Running Optuna hyperparameter optimization...")
+    print("=" * 80)
+    print(f"Starting {N_TRIALS} trials (this may take 10-30 minutes)")
+    print("=" * 80)
+    
+    # Create Optuna study
+    study = optuna.create_study(
+        direction='maximize',  # Maximize ROC AUC
+        study_name=f"xgboost_{TARGET_ANTIBIOTIC}_optimization"
+    )
+    
+    # Run optimization with Graceful Shutdown (Fault Tolerance)
+    try:
+        study.optimize(
+            lambda trial: objective(trial, dtrain_opt, dval_opt, BASE_PARAMS),
+            n_trials=N_TRIALS,
+            show_progress_bar=False
+        )
+    except KeyboardInterrupt:
+        print("\n\n  ⚠ Optimization manually interrupted by user (Ctrl+C).")
+    except Exception as e:
+        print(f"\n\n  ⚠ Optimization stopped unexpectedly: {e}")
+    finally:
+        # Graceful Shutdown: Save progress if at least one trial completed
+        valid_trials = [t for t in study.trials if t.value is not None]
+        
+        if len(valid_trials) > 0:
+            print("\n" + "=" * 80)
+            print("SAVING PROGRESS (GRACEFUL SHUTDOWN)")
+            print("=" * 80)
+            print(f"  ✓ Found {len(valid_trials)} completed trials. Extracting best results so far...")
+            
+            # Generate Visualizations
+            generate_optuna_plots(study, TARGET_ANTIBIOTIC)
+            
+            # Display best results found
+            print(f"\nBest ROC AUC Score: {study.best_value:.4f}")
+            print("\nBest Hyperparameters:")
+            print("-" * 80)
+            for param, value in study.best_params.items():
+                print(f"  {param:<20} : {value}")
+            print("-" * 80)
+            
+            # Save Results
+            print("\nSaving configurations...")
+            try:
+                antibiotic_config_path = save_antibiotic_specific_config(
+                    study=study,
+                    base_params=BASE_PARAMS,
+                    target_antibiotic=TARGET_ANTIBIOTIC,
+                    config_dir=CONFIG_DIR,
+                    train_filenames=train_filenames,
+                    test_filenames=test_filenames,
+                    optuna_filenames=optuna_filenames
+                )
+                print(f"  ✓ Antibiotic-specific config created: {antibiotic_config_path.name}")
+            except Exception as e:
+                print(f"ERROR: Failed to create antibiotic config: {e}")
+            
+            # Save complete study object
+            study_path = MODELS_DIR / f"optuna_study_{TARGET_ANTIBIOTIC}.pkl"
+            try:
+                joblib.dump(study, study_path)
+                print(f"  ✓ Full study object saved: {study_path}")
+            except Exception as e:
+                print(f"WARNING: Failed to save study object: {e}")
+            
+            # Display next steps
+            print("\n" + "=" * 80)
+            print("NEXT STEPS")
+            print("=" * 80)
+            print(f"1. Review optimized parameters in: config/config_{TARGET_ANTIBIOTIC}.yaml")
+            print("2. Run final training with optimized hyperparameters:")
+            print("   python scripts/05_model_training.py")
+            print("=" * 80)
+        else:
+            print("\n" + "=" * 80)
+            print("  ⚠ No completed trials found. Cannot save configuration or plots.")
+            print("=" * 80)
+
+
+# ============================================================================
+# SCRIPT ENTRY POINT
+# ============================================================================
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,127 @@
+# ============================================================================
+# AMR PREDICTION PROJECT CONFIGURATION FILE
+# ============================================================================
+# This YAML file contains all configurable parameters for the antimicrobial
+# resistance prediction pipeline. Modify these values to customize the
+# analysis for different antibiotics, organisms, or computational resources.
+#
+# Purpose: Centralized configuration for reproducibility and easy parameter tuning
+# Date: 2025
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# PROJECT METADATA
+# ----------------------------------------------------------------------------
+project:
+  name: "AMR_Genomic_Project"
+  description: "Machine learning-based antimicrobial resistance prediction using k-mer features"
+  target_antibiotic: "ciprofloxacin"  # Primary antibiotic for analysis
+  organism: "Escherichia coli"  # Target organism
+  model: "xgboost"  # ML model
+  version: "M4-pro"
+
+# ----------------------------------------------------------------------------
+# DIRECTORY PATHS (Relative to project root)
+# ----------------------------------------------------------------------------
+# All paths use forward slashes for cross-platform compatibility
+# Absolute paths or ~ (home directory) can also be used
+#
+# MULTI-ANTIBIOTIC ARCHITECTURE:
+# Changing 'target_antibiotic' automatically creates isolated directory structures:
+# - data/{antibiotic}/kmc_outputs/
+# - data/{antibiotic}/matrix/
+# - models/{antibiotic}/
+# - analysis_results/{antibiotic}/
+# - logs/{antibiotic}/
+#
+# Shared directories (global across all antibiotics):
+# - data/raw_genomes/ (genome assemblies used for all antibiotics)
+# - data/metadata/ (AMR phenotype labels for all antibiotics)
+paths:
+  # Global data directories (shared across all antibiotics)
+  data_dir: "data"
+  raw_genomes_dir: "data/raw_genomes"  # Input: FASTA genome assemblies (global)
+  metadata_file: "data/metadata/genome_amr_matrix.csv"  # AMR phenotype data (global)
+  
+  # Antibiotic-specific directories (dynamically set based on target_antibiotic)
+  # These paths will automatically include the antibiotic name
+  kmc_outputs_dir: "data/global_kmc_outputs"  # K-mer count databases globally
+  matrix_dir: "data/{antibiotic}/matrix"  # Feature matrices and labels per antibiotic
+  logs_dir: "logs/{antibiotic}"  # Processing logs per antibiotic
+  models_dir: "models/{antibiotic}"  # Trained models per antibiotic
+  analysis_results_dir: "analysis_results/{antibiotic}"  # Analysis outputs per antibiotic
+  
+  # External tool paths (system-specific, global)
+  # Adjust these based on your KMC installation location
+  kmc_bin: "bin/bin/kmc"  # Relative to project root
+  kmc_tools_bin: "bin/bin/kmc_tools"  # Relative to project root
+
+# ----------------------------------------------------------------------------
+# DATA PREPROCESSING PARAMETERS
+# ----------------------------------------------------------------------------
+preprocessing:
+  # K-mer counting configuration
+  k_length: 21  # K-mer length
+  min_support: 5  # Minimum genomes a k-mer must appear in to be retained
+  # Rationale: Filters out rare k-mers (likely errors or strain-specific)
+  
+  # Computational resources
+  kmc_mem: 16  # Memory allocation for KMC (GB)
+  threads: 10  # Number of CPU threads to use
+  chunk_size: 200  # Genomes per matrix chunk (for RAM management)
+  
+  # Feature engineering
+  encoding: "binary"  # Binary (presence/absence) or frequency-basedß
+  # Binary is preferred for assembled genomes
+
+# ----------------------------------------------------------------------------
+# MACHINE LEARNING TRAINING PARAMETERS
+# ----------------------------------------------------------------------------
+training:
+  # Data splitting (Scale-Invariant Fractional Method)
+  random_seed: 42  # For reproducible train/test splits
+  test_fraction: 0.20  # Fraction of total chunks reserved for testing (20%)
+  validation_fraction: 0.2  # Fraction of training data for early stopping validation
+  
+  # Hyperparameter optimization
+  n_trials: 20  # Number of Optuna optimization trials
+  optuna_fraction: 0.25  # Fraction of training chunks loaded into RAM during Bayesian opt (25%)
+  optimization_metric: "auc"  # Metric to optimize (auc, accuracy, f1)
+
+# ----------------------------------------------------------------------------
+# XGBOOST MODEL CONFIGURATION
+# ----------------------------------------------------------------------------
+xgboost_params:
+  # Core parameters (fixed during training)
+  objective: "binary:logistic"  # Binary classification
+  eval_metric: "auc"  # Evaluation metric
+  booster: "gbtree"  # Tree-based booster
+  tree_method: "hist"  # Histogram-based algorithm (faster)
+  device: "cpu"  # Computation device (cpu or cuda for GPU)
+  verbosity: 1  # 0=silent, 1=warning, 2=info, 3=debug
+  n_jobs: 10  # Parallel threads
+  
+  # Early stopping
+  early_stopping_rounds: 50  # Stop if no improvement for N rounds
+
+# ----------------------------------------------------------------------------
+# OPTIMIZED HYPERPARAMETERS
+# ----------------------------------------------------------------------------
+# NOTE: Hyperparameters are now stored in antibiotic-specific config files:
+# - config/config_ciprofloxacin.yaml
+# - config/config_tetracycline.yaml
+# - etc.
+#
+# These files are auto-generated by 04_optimization.py and contain:
+# - Optimization metadata (date, ROC AUC, trials)
+# - Fixed XGBoost parameters
+# - Best hyperparameters from Optuna optimization
+#
+# This architecture enables parallel optimization for multiple antibiotics
+# without conflicts.
+
+# ----------------------------------------------------------------------------
+# ANALYSIS PARAMETERS
+# ----------------------------------------------------------------------------
+analysis:
+  top_n_features: 50  # Number of top features to extract for biological analysis

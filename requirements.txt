@@ -1,0 +1,44 @@
+# ============================================================================
+# Python Requirements for AMR Prediction Project
+# ============================================================================
+# Install all dependencies with: pip install -r requirements.txt
+#
+# For conda users: conda install --file requirements.txt
+# ============================================================================
+
+# Core Data Science Libraries
+# ----------------------------------------------------------------------------
+pandas>=1.3.0               # Data manipulation and analysis
+numpy>=1.21.0               # Numerical computing
+scipy>=1.7.0                # Scientific computing (sparse matrices)
+
+# Machine Learning
+# ----------------------------------------------------------------------------
+scikit-learn>=1.0.0         # ML algorithms and metrics
+xgboost>=1.5.0              # Gradient boosting framework
+optuna>=2.10.0              # Hyperparameter optimization
+joblib>=1.0.0               # Model and study object serialization
+
+# Utilities
+# ----------------------------------------------------------------------------
+tqdm>=4.62.0                # Progress bars
+pyyaml>=5.4.0               # YAML configuration file parsing
+
+# Advanced Analysis
+# ----------------------------------------------------------------------------
+matplotlib>=3.4.0         # Plotting (for visualizations)
+seaborn>=0.11.0           # Statistical visualizations
+shap>=0.40.0              # Model explainability
+
+# Optional: Jupyter Notebook Support
+# ----------------------------------------------------------------------------
+# jupyter>=1.0.0            # Interactive notebooks
+# ipython>=7.27.0           # Enhanced Python shell
+
+# ============================================================================
+# External Tools (Not installable via pip)
+# ============================================================================
+# KMC v3.2+: K-mer counting tool
+#   Download: https://github.com/refresh-bio/KMC/releases
+#   Installation: Extract binaries to bin/ directory
+# ============================================================================
