@@ -271,13 +271,26 @@ def final_training_incremental(best_params, train_files, y_all):
                 chunk_num = int(chunk_file.stem.split('_')[-1])
                 y_chunk = get_y_chunk(y_all, chunk_num, CHUNK_SIZE, len(y_all))
                 
+                # Pop scale_pos_weight to avoid double-dipping with dynamic weights
+                params.pop('scale_pos_weight', None)
+
+                # Dynamic Instance Weighting (Solves Local Chunk Imbalance)
+                pos_count = np.sum(y_chunk)
+                neg_count = len(y_chunk) - pos_count
+
+                if pos_count > 0 and neg_count > 0:
+                    weight_ratio = neg_count / pos_count
+                    weights = np.where(y_chunk == 1, weight_ratio, 1.0)
+                else:
+                    weights = np.ones(len(y_chunk))  # Fallback if perfectly pure chunk
+
                 n_jobs = params.get('nthread', params.get('n_jobs', -1))
-                dtrain = xgb.DMatrix(X_chunk, label=y_chunk, nthread=n_jobs)
-                
+                dtrain = xgb.DMatrix(X_chunk, label=y_chunk, weight=weights, nthread=n_jobs)
+
                 # Train exactly 1 tree per chunk to distribute learning evenly
                 model = xgb.train(params, dtrain, num_boost_round=1, xgb_model=model)
-                
-                del X_chunk, y_chunk, dtrain
+
+                del X_chunk, y_chunk, dtrain, weights
                 gc.collect()
             except Exception as e:
                 print(f"  ✗ ERROR in Chunk {chunk_file.name}: {e}")
@@ -285,11 +298,12 @@ def final_training_incremental(best_params, train_files, y_all):
         
         print(f"  ✓ Epoch {epoch+1} Complete. Current Trees in Model: {model.num_boosted_rounds()}")
     
-    # CRITICAL FIX: scale_pos_weight is active, so optimal threshold is mathematically 0.5
+    # Dynamic Instance Weighting is active: threshold remains 0.5 (no double-dipping)
     print("\n[Threshold Configuration]")
-    print("  scale_pos_weight is active. Model probabilities are internally calibrated.")
+    print("  Dynamic Instance Weighting active. Per-chunk neg/pos weight ratio applied to DMatrix.")
+    print("  scale_pos_weight removed from params (prevents double-dipping with dynamic weights).")
     optimal_threshold = 0.5
-    print(f"  Optimal Threshold fixed to: {optimal_threshold:.4f} (Prevents Double-Dipping)")
+    print(f"  Optimal Threshold fixed to: {optimal_threshold:.4f} (calibrated via Dynamic Instance Weighting)")
     
     return model, optimal_threshold
 
@@ -487,7 +501,7 @@ def main():
         # Save threshold to the antibiotic-specific config
         antibiotic_config['evaluation'] = {
             'optimal_threshold': float(round(float(optimal_threshold), 4)),
-            'threshold_type': 'Balanced_by_Scale_Pos_Weight (0.5)'
+            'threshold_type': 'Dynamic_Instance_Weighting (0.5 — per-chunk neg/pos ratio applied to DMatrix)'
         }
         
         with open(antibiotic_config_path, 'w', encoding='utf-8') as f:

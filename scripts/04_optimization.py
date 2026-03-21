@@ -84,7 +84,7 @@ EARLY_STOPPING_ROUNDS = config['xgboost_params']['early_stopping_rounds']
 # XGBoost base parameters (fetched from config)
 BASE_PARAMS = {
     'objective': config['xgboost_params'].get('objective', 'binary:logistic'),
-    'eval_metric': config['xgboost_params'].get('eval_metric', 'auc'),
+    'eval_metric': 'aucpr',  # Changed to PR-AUC to heavily penalize False Negatives
     'tree_method': config['xgboost_params'].get('tree_method', 'hist'),
     'nthread': config['xgboost_params'].get('n_jobs', -1),
     'device': config['xgboost_params'].get('device', 'cpu'),
@@ -193,22 +193,23 @@ def analyze_and_stratify_all_chunks(y_all, all_files, chunk_size, test_fraction,
             'id': chunk_num,
             'pos_count': pos_count,
             'total': total_count,
-            'ratio': ratio
+            'ratio': ratio,
+            'imbalance_score': abs(ratio - 0.5)  # Distance from perfect 50/50 balance
         })
     
-    # Sort by resistance ratio (descending: hardest → easiest)
-    df_stats = pd.DataFrame(chunk_stats).sort_values(by='ratio', ascending=False).reset_index(drop=True)
+    # Sort by imbalance_score (descending: Most Imbalanced (HARD) -> Most Balanced (EASY))
+    df_stats = pd.DataFrame(chunk_stats).sort_values(by='imbalance_score', ascending=False).reset_index(drop=True)
     
-    print("\n[Phase 2/4] Resistance spectrum analysis:")
-    print("-" * 80)
-    print(f"{'Rank':<6} | {'Chunk ID':<10} | {'Resistant':<12} | {'Total':<10} | {'Ratio':<10}")
-    print("-" * 80)
+    print("\n[Phase 2/4] Resistance spectrum analysis (sorted by Imbalance Score):")
+    print("-" * 90)
+    print(f"{'Rank':<6} | {'Chunk ID':<10} | {'Resistant':<12} | {'Total':<10} | {'Ratio':<10} | {'Imbalance Score':<15}")
+    print("-" * 90)
     for idx, row in df_stats.head(5).iterrows():
-        print(f"{idx+1:<6} | {row['id']:<10} | {row['pos_count']:<12} | {row['total']:<10} | {row['ratio']:<10.4f}")
+        print(f"{idx+1:<6} | {row['id']:<10} | {row['pos_count']:<12} | {row['total']:<10} | {row['ratio']:<10.4f} | {row['imbalance_score']:<15.4f}")
     print("...")
     for idx, row in df_stats.tail(2).iterrows():
-        print(f"{idx+1:<6} | {row['id']:<10} | {row['pos_count']:<12} | {row['total']:<10} | {row['ratio']:<10.4f}")
-    print("-" * 80)
+        print(f"{idx+1:<6} | {row['id']:<10} | {row['pos_count']:<12} | {row['total']:<10} | {row['ratio']:<10.4f} | {row['imbalance_score']:<15.4f}")
+    print("-" * 90)
     
     # Validate and calculate fractional test chunks
     total_chunks = len(df_stats)
@@ -229,8 +230,8 @@ def analyze_and_stratify_all_chunks(y_all, all_files, chunk_size, test_fraction,
     print("-" * 80)
     for idx, test_idx in enumerate(test_indices):
         row = df_stats.iloc[test_idx]
-        difficulty = "HARD" if row['ratio'] > 0.6 else "MEDIUM" if row['ratio'] > 0.3 else "EASY"
-        print(f"  {idx+1}. {row['filename']:<30} | Ratio: {row['ratio']:.4f} | {difficulty}")
+        difficulty = "HARD (Imbalanced)" if row['imbalance_score'] > 0.3 else "MEDIUM" if row['imbalance_score'] > 0.15 else "EASY (Balanced)"
+        print(f"  {idx+1}. {row['filename']:<30} | Ratio: {row['ratio']:.4f} | Imbalance: {row['imbalance_score']:.4f} | {difficulty}")
     print("-" * 80)
     
     # Training pool: all chunks NOT in test set
@@ -262,8 +263,8 @@ def analyze_and_stratify_all_chunks(y_all, all_files, chunk_size, test_fraction,
         print("-" * 80)
         for idx_order, idx_val in enumerate(optuna_indices):
             row = train_df_sorted.iloc[idx_val]
-            difficulty = "HARD" if row['ratio'] > 0.6 else "MEDIUM" if row['ratio'] > 0.3 else "EASY"
-            print(f"  {idx_order+1}. {row['filename']:<30} | Ratio: {row['ratio']:.4f} | {difficulty}")
+            difficulty = "HARD (Imbalanced)" if row['imbalance_score'] > 0.3 else "MEDIUM" if row['imbalance_score'] > 0.15 else "EASY (Balanced)"
+            print(f"  {idx_order+1}. {row['filename']:<30} | Ratio: {row['ratio']:.4f} | Imbalance: {row['imbalance_score']:.4f} | {difficulty}")
         print("-" * 80)
     else:
         # Fallback if no training chunks
@@ -499,7 +500,7 @@ def objective(trial, dtrain, dval, base_params):
         'colsample_bytree': trial.suggest_float('colsample_bytree', 0.05, 0.3),  # Reduced to 5-30% for 48M features
         'min_child_weight': trial.suggest_int('min_child_weight', 1, 10),
         'gamma': trial.suggest_float('gamma', 0, 5),
-        'scale_pos_weight': trial.suggest_float('scale_pos_weight', 1.0, 10.0),
+        #'scale_pos_weight': trial.suggest_float('scale_pos_weight', 1.0, 10.0),
     })
     
     # Train model with early stopping (let XGBoost find the optimal trees)
@@ -523,8 +524,10 @@ def generate_optuna_plots(study, target_antibiotic):
     """Generate and save Optuna optimization visualizations using matplotlib."""
     print("\nGenerating Optuna visualization plots...")
     
-    # Define output directory for ML analysis
-    output_dir = PROJECT_ROOT / "analysis_results" / target_antibiotic / "model_optimization"
+    # Derive output directory from centralised config (03_model_optimization)
+    output_dir = PROJECT_ROOT / config['paths']['dir_03_model_optimization'].format(
+        antibiotic=target_antibiotic
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     
     try:

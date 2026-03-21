@@ -28,32 +28,41 @@ project:
 #
 # MULTI-ANTIBIOTIC ARCHITECTURE:
 # Changing 'target_antibiotic' automatically creates isolated directory structures:
-# - data/{antibiotic}/kmc_outputs/
-# - data/{antibiotic}/matrix/
+# - data/processed/{antibiotic}/matrix/
 # - models/{antibiotic}/
-# - analysis_results/{antibiotic}/
+# - results/{antibiotic}/
 # - logs/{antibiotic}/
 #
-# Shared directories (global across all antibiotics):
-# - data/raw_genomes/ (genome assemblies used for all antibiotics)
-# - data/metadata/ (AMR phenotype labels for all antibiotics)
+# Cookiecutter Data Science layout:
+# - data/raw/raw_genomes/       — original, immutable genome assemblies
+# - data/external/metadata/     — AMR phenotype labels
+# - data/external/blast_db/     — third-party databases (CARD)
+# - data/interim/               — intermediate transformations (k-mer DBs)
+# - data/processed/             — final, canonical feature matrices
+# - results/                    — all analysis outputs (replaces analysis_results/)
 paths:
-  # Global data directories (shared across all antibiotics)
-  data_dir: "data"
-  raw_genomes_dir: "data/raw_genomes"  # Input: FASTA genome assemblies (global)
-  metadata_file: "data/metadata/genome_amr_matrix.csv"  # AMR phenotype data (global)
-  
-  # Antibiotic-specific directories (dynamically set based on target_antibiotic)
-  # These paths will automatically include the antibiotic name
-  kmc_outputs_dir: "data/global_kmc_outputs"  # K-mer count databases globally
-  matrix_dir: "data/{antibiotic}/matrix"  # Feature matrices and labels per antibiotic
-  logs_dir: "logs/{antibiotic}"  # Processing logs per antibiotic
-  models_dir: "models/{antibiotic}"  # Trained models per antibiotic
-  analysis_results_dir: "analysis_results/{antibiotic}"  # Analysis outputs per antibiotic
-  
-  # External tool paths (system-specific, global)
-  # Adjust these based on your KMC installation location
-  kmc_bin: "bin/bin/kmc"  # Relative to project root
+  # ── Global (shared across all antibiotics) ────────────────────────────────
+  data_dir:         "data"
+  raw_genomes_dir:  "data/raw/raw_genomes"              # Immutable genome assemblies
+  metadata_file:    "data/external/metadata/genome_amr_matrix.csv"  # AMR phenotype labels
+  kmc_outputs_dir:  "data/interim/global_kmc_outputs"   # KMC binary databases
+
+  # ── Antibiotic-specific (resolved with {antibiotic} placeholder) ───────────
+  matrix_dir:           "data/processed/{antibiotic}/matrix"  # Feature matrices & labels
+  logs_dir:             "logs/{antibiotic}"                    # Processing logs
+  models_dir:           "models/{antibiotic}"                  # Trained models
+  analysis_results_dir: "results/{antibiotic}"                 # Analysis outputs
+
+  # Standardised, numbered analysis sub-directories (created on demand by each script)
+  # Sequentially numbered so output folders sort naturally and reproduce the pipeline order.
+  dir_01_data_exploration:   "results/{antibiotic}/01_data_exploration"
+  dir_02_matrix_qc:          "results/{antibiotic}/02_matrix_qc"
+  dir_03_model_optimization: "results/{antibiotic}/03_model_optimization"
+  dir_04_evaluation:         "results/{antibiotic}/04_evaluation"
+  dir_05_explainability:     "results/{antibiotic}/05_explainability"
+
+  # ── External tool paths (system-specific) ─────────────────────────────────
+  kmc_bin:       "bin/bin/kmc"        # Relative to project root
   kmc_tools_bin: "bin/bin/kmc_tools"  # Relative to project root
 
 # ----------------------------------------------------------------------------
@@ -84,7 +93,7 @@ training:
   validation_fraction: 0.2  # Fraction of training data for early stopping validation
   
   # Hyperparameter optimization
-  n_trials: 20  # Number of Optuna optimization trials
+  n_trials: 25  # Number of Optuna optimization trials
   optuna_fraction: 0.25  # Fraction of training chunks loaded into RAM during Bayesian opt (25%)
   optimization_metric: "auc"  # Metric to optimize (auc, accuracy, f1)
 
@@ -125,3 +134,24 @@ xgboost_params:
 # ----------------------------------------------------------------------------
 analysis:
   top_n_features: 50  # Number of top features to extract for biological analysis
+
+# ----------------------------------------------------------------------------
+# BLAST ANNOTATION PARAMETERS (Step 08)
+# ----------------------------------------------------------------------------
+# Used by 08_blast_annotation.py (Python orchestrator) and
+# 08_blast_pipeline.nf (Nextflow processes).
+#
+# CARD Local BLAST:
+#   - card_db_dir / card_db_name point to a pre-built blastn database from the
+#     Comprehensive Antibiotic Resistance Database (CARD).
+#   - Build with: makeblastdb -in card.fna -dbtype nucl -out data/blast_db/card_nt/card
+#
+# NCBI Remote BLAST:
+#   - Uses the NCBI blastn -remote flag. Requires an internet connection.
+#   - No local database needed; queries are sent directly to NCBI servers.
+blast:
+  card_db_dir:  "data/external/blast_db/card_nt"  # Relative to project root (Cookiecutter: external)
+  card_db_name: "card"                   # Base name of the blastn database
+  evalue:       10                        # E-value threshold for reporting hits
+  word_size:    11                        # Seed word size (11 is standard for short seqs)
+  threads:      8                         # CPU threads for local BLAST only
