@@ -38,7 +38,13 @@ shap>=0.40.0              # Model explainability
 # ============================================================================
 # External Tools (Not installable via pip)
 # ============================================================================
-# KMC v3.2+: K-mer counting tool
-#   Download: https://github.com/refresh-bio/KMC/releases
-#   Installation: Extract binaries to bin/ directory
+# 1. KMC v3.2+: K-mer counting tool (Required for Steps 02, 03)
+#    - Download: https://github.com/refresh-bio/KMC/releases
+#
+# 2. BLAST+ (ncbi-blast): Sequence homology search (Required for Step 08)
+#    - macOS: brew install blast
+#    - Conda: conda install -c bioconda blast
+#
+# 3. Nextflow: Bioinformatics workflow manager (Required for Step 08)
+#    - Install: curl -s https://get.nextflow.io | bash && mv nextflow /usr/local/bin/
 # ============================================================================

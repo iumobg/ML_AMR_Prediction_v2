@@ -13,6 +13,9 @@
    - [3.2 Optuna HPO and the Square Root Heuristic](#32-optuna-hpo-and-the-square-root-heuristic)
    - [3.3 Stratified Linspace Chunk Selection](#33-stratified-linspace-chunk-selection)
    - [3.4 Epoch-Based Incremental Learning](#34-epoch-based-incremental-learning)
+4. [Explainable AI and Biological Validation](#4-explainable-ai-and-biological-validation)
+   - [4.1 Feature Importance Mapping](#41-feature-importance-mapping)
+   - [4.2 Automated Nextflow BLAST Pipeline](#42-automated-nextflow-blast-pipeline)
 
 ---
 
@@ -254,6 +257,21 @@ ensuring the cumulative update magnitude scales appropriately with the number of
 
 ---
 
+## 4. Explainable AI and Biological Validation
+
+### 4.1 Feature Importance Mapping
+
+Our methodology ensures that the machine learning models remain entirely interpretable. Once the XGBoost model is trained, we extract the top k-mer sequences using the **Gain** metric. In tree-based models, Gain calculates the fractional contribution of each feature to the model's overall predictive power, essentially quantifying how much a specific 21-mer improves the classification of resistance. High-gain k-mers represent critical biological signals. These top features are subsequently converted back into the `.fasta` format to facilitate downstream biological querying.
+
+### 4.2 Automated Nextflow BLAST Pipeline
+
+To translate mathematical importance into biological relevance, we employ a dual-pronged biological validation strategy via an automated Nextflow pipeline:
+
+1. **CARD Local BLAST:** We query the top features against a rigorously curated local installation of the Comprehensive Antibiotic Resistance Database (CARD). This step rapidly identifies acquired resistance mechanisms such as horizontal gene transfer events, specific efflux pumps (e.g., *msbA*), and plasmid-mediated resistance determinants (e.g., *OXA* variants).
+2. **NCBI Remote BLAST (`nt` database):** For zero-alignment, reference-free discovery of chromosomal mutations, features are queried against the massive NCBI `nt` database. This alignment-free approach enables the autonomous discovery of core-genome point mutations (SNPs), seamlessly identifying phenomena such as the Quinolone Resistance-Determining Region (QRDR) mutations within the *gyrA* and *parC* genes.
+
+---
+
 ## Summary of Design Decisions
 
 | Component | Problem Solved | Technical Solution |
@@ -265,6 +283,7 @@ ensuring the cumulative update magnitude scales appropriately with the number of
 | Optuna TPE + early stopping | Conflicting HPO and early stopping | Fixed `num_boost_round`; `best_iteration` captured |
 | Stratified linspace chunk selection | Biased mini-batch resistance ratios | Sorted-by-ratio linspace chunk indexing |
 | Epoch-based shuffled training | Catastrophic forgetting in sequential learning | Per-epoch random permutation of chunk order |
+| Nextflow Dual-BLAST (CARD + NCBI) | Black-box ML lack of biological interpretability | Asynchronous pipeline mapping mathematical Gain scores back to known physical AMR mechanisms (SNPs & Plasmids). |
 
 ---
 
