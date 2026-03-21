@@ -131,7 +131,7 @@ XGBoost's histogram-based tree learning algorithm discretizes continuous feature
 
 Our k-mer features are **binary** ($X_{ij} \in \{0, 1\}$). A binary feature has only one meaningful split point: $X_{ij} < 0.5$ (i.e., absent) vs. $X_{ij} \geq 0.5$ (i.e., present). Therefore, we set:
 
-$$\texttt{max\_bin} = 2$$
+$$\texttt{max\\_bin} = 2$$
 
 This has a profound impact on memory:
 
@@ -162,11 +162,11 @@ where $f^*$ is the current best observed value.
 
 In the $p \gg n$ setting, selecting all $p$ features per tree split is both computationally prohibitive and statistically harmful (overfitting). A well-established heuristic from random forests suggests using $m \approx \sqrt{p}$ features per split. In XGBoost's `colsample_bytree` parameter, this is expressed as a fraction:
 
-$$\texttt{colsample\_bytree} = \frac{m}{p} = \frac{\sqrt{p}}{p} = \frac{1}{\sqrt{p}} = p^{-1/2}$$
+$$\texttt{colsample\\_bytree} = \frac{m}{p} = \frac{\sqrt{p}}{p} = \frac{1}{\sqrt{p}} = p^{-1/2}$$
 
 For $p = 5 \times 10^6$:
 
-$$\texttt{colsample\_bytree} = \frac{1}{\sqrt{5 \times 10^6}} \approx \frac{1}{2236} \approx 4.5 \times 10^{-4}$$
+$$\texttt{colsample\\_bytree} = \frac{1}{\sqrt{5 \times 10^6}} \approx \frac{1}{2236} \approx 4.5 \times 10^{-4}$$
 
 This means each tree sees only ~0.045% of features — a massive regularization effect that simultaneously reduces computation from $\mathcal{O}(p \cdot n)$ per split to $\mathcal{O}(\sqrt{p} \cdot n)$.
 
@@ -196,7 +196,7 @@ $$r_c = \frac{|\{i \in c : y_i = 1\}|}{|c|}$$
 
 To select $k$ chunks that collectively preserve the global resistance ratio $\bar{r}$, we sort chunks by $r_c$ and select indices using `numpy.linspace`:
 
-$$\text{selected\_indices} = \text{round}\left(\text{linspace}(0,\, C-1,\, k)\right)$$
+$$\text{selected\\_indices} = \text{round}\left(\text{linspace}(0,\, C-1,\, k)\right)$$
 
 applied to the **sorted** array of $(c, r_c)$ pairs. This ensures selected chunks are spread uniformly across the resistance distribution, providing a balanced sample regardless of which $k$ chunks are selected.
 
