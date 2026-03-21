@@ -58,11 +58,12 @@ MODEL_FILE = f"xgboost_{TARGET_ANTIBIOTIC}_final_v2.json"
 # Cross-platform paths (antibiotic-specific)
 BASE_DIR = PROJECT_ROOT / "data"
 
-# Antibiotic-specific paths
-ANTIBIOTIC_DIR = BASE_DIR / TARGET_ANTIBIOTIC
-MATRIX_DIR = ANTIBIOTIC_DIR / "matrix"
-MODELS_DIR = PROJECT_ROOT / "models" / TARGET_ANTIBIOTIC
-OUTPUT_DIR = PROJECT_ROOT / "analysis_results" / TARGET_ANTIBIOTIC
+# Antibiotic-specific paths — derived from centralised config keys
+MATRIX_DIR = PROJECT_ROOT / config['paths']['matrix_dir'].format(antibiotic=TARGET_ANTIBIOTIC)
+MODELS_DIR = PROJECT_ROOT / config['paths']['models_dir'].format(antibiotic=TARGET_ANTIBIOTIC)
+OUTPUT_DIR = PROJECT_ROOT / config['paths']['dir_05_explainability'].format(
+    antibiotic=TARGET_ANTIBIOTIC
+)
 
 # Create output directory
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -112,13 +113,13 @@ def extract_top_features():
                 f"Please train the model first (05_model_training.py)"
             )
         
-        # Load model using XGBClassifier wrapper
-        model = xgb.XGBClassifier()
+        # Load model natively as Booster
+        model = xgb.Booster()
         model.load_model(str(model_path))
         
         print(f"  ✓ Model loaded: {MODEL_FILE}")
-        print(f"  ✓ Total features in model: {model.n_features_in_}")
-        print(f"  ✓ Total trees: {model.n_estimators}")
+        print(f"  ✓ Total features in model: {model.num_features()}")
+        print(f"  ✓ Total trees: {model.num_boosted_rounds()}")
         
     except FileNotFoundError as e:
         print(f"ERROR: {e}")
@@ -137,7 +138,7 @@ def extract_top_features():
         # Get feature importance using 'gain' metric
         # Gain = average improvement in accuracy when feature is used for splitting
         # This is the most interpretable metric for understanding feature contribution
-        importance_dict = model.get_booster().get_score(importance_type='gain')
+        importance_dict = model.get_score(importance_type='gain')
         
         print(f"  ✓ Extracted importance scores for {len(importance_dict)} features")
         
@@ -247,13 +248,13 @@ def extract_top_features():
         # Create DataFrame
         results_df = pd.DataFrame(results_data)
         
-        # Export to CSV
-        csv_path = OUTPUT_DIR / f"top_{TOP_N}_features_{TARGET_ANTIBIOTIC}_final.csv"
+        # Export to CSV (sequentially prefixed for consistent folder sort)
+        csv_path = OUTPUT_DIR / f"01_top_{TOP_N}_features_{TARGET_ANTIBIOTIC}.csv"
         results_df.to_csv(csv_path, index=False, encoding='utf-8')
         print(f"  ✓ CSV saved: {csv_path}")
         
-        # Export to FASTA (for BLAST analysis)
-        fasta_path = OUTPUT_DIR / f"top_{TOP_N}_features_{TARGET_ANTIBIOTIC}_final.fasta"
+        # Export to FASTA (sequentially prefixed for consistent folder sort)
+        fasta_path = OUTPUT_DIR / f"02_top_{TOP_N}_features_{TARGET_ANTIBIOTIC}.fasta"
         with open(fasta_path, 'w', encoding='utf-8') as f:
             f.write("\n".join(fasta_lines))
         print(f"  ✓ FASTA saved: {fasta_path}")

@@ -51,11 +51,15 @@ try:
     with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
     TARGET_ANTIBIOTIC = config['project']['target_antibiotic']
-    
+
     BASE_DIR = PROJECT_ROOT / "data"
     MATRIX_DIR = BASE_DIR / TARGET_ANTIBIOTIC / "matrix"
-    OUTPUT_DIR = PROJECT_ROOT / "analysis_results" / TARGET_ANTIBIOTIC / "data_exploration"
-    
+
+    # Derive output directory from the centralised config key (02_matrix_qc)
+    OUTPUT_DIR = PROJECT_ROOT / config['paths']['dir_02_matrix_qc'].format(
+        antibiotic=TARGET_ANTIBIOTIC
+    )
+
 except Exception as e:
     print(f"ERROR loading config: {e}")
     sys.exit(1)
@@ -135,7 +139,7 @@ def plot_class_balance(y_df):
     Helps justify if SMOTE or class weighting is needed later.
     """
     print("Generating Final ML Class Balance...")
-    output_path = OUTPUT_DIR / f"07_final_matrix_class_balance_{TARGET_ANTIBIOTIC}.png"
+    output_path = OUTPUT_DIR / f"01_class_balance_{TARGET_ANTIBIOTIC}.png"
     if output_path.exists():
         print(f" -> Skipping: {output_path.name} already exists.")
         return
@@ -200,7 +204,7 @@ def plot_matrix_sparsity(chunk_df):
     If it's dense (e.g. 10% sparsity), the k-mer length or filtering logic is flawed.
     """
     print("Generating Matrix Sparsity Distribution...")
-    output_path = OUTPUT_DIR / f"08_matrix_sparsity_check_{TARGET_ANTIBIOTIC}.png"
+    output_path = OUTPUT_DIR / f"02_sparsity_check_{TARGET_ANTIBIOTIC}.png"
     if output_path.exists():
         print(f" -> Skipping: {output_path.name} already exists.")
         return
@@ -256,7 +260,7 @@ def plot_chunk_memory_footprint(chunk_df):
     Important for reproducibility and hardware requirements logic.
     """
     print("Generating Chunk Memory Profile...")
-    output_path = OUTPUT_DIR / f"09_matrix_memory_profile_{TARGET_ANTIBIOTIC}.png"
+    output_path = OUTPUT_DIR / f"03_memory_profile_{TARGET_ANTIBIOTIC}.png"
     if output_path.exists():
         print(f" -> Skipping: {output_path.name} already exists.")
         return
@@ -305,7 +309,7 @@ def plot_feature_prevalence(MATRIX_DIR, TARGET_ANTIBIOTIC, OUTPUT_DIR):
     across genomes in the first matrix chunk. Reveals the balance between core and accessory genes.
     """
     print("\nGenerating Global Feature Prevalence Distribution...")
-    output_path = OUTPUT_DIR / f"11_global_feature_prevalence_distribution_{TARGET_ANTIBIOTIC}.png"
+    output_path = OUTPUT_DIR / f"04_feature_prevalence_{TARGET_ANTIBIOTIC}.png"
     if output_path.exists():
         print(f" -> Skipping: {output_path.name} already exists.")
         return
@@ -374,8 +378,8 @@ def plot_feature_prevalence(MATRIX_DIR, TARGET_ANTIBIOTIC, OUTPUT_DIR):
 
 def plot_svd_separability(MATRIX_DIR, TARGET_ANTIBIOTIC, y_data):
     print("\nGenerating Exact Global SVD Separability Proof (100% Data Deduction)...")
-    output_path_2d = OUTPUT_DIR / f"13_global_svd_2d_separability_{TARGET_ANTIBIOTIC}.png"
-    output_path_3d = OUTPUT_DIR / f"14_global_svd_3d_separability_{TARGET_ANTIBIOTIC}.png"
+    output_path_2d = OUTPUT_DIR / f"05_svd_2d_separability_{TARGET_ANTIBIOTIC}.png"
+    output_path_3d = OUTPUT_DIR / f"05_svd_3d_separability_{TARGET_ANTIBIOTIC}.png"
     
     if output_path_2d.exists() and output_path_3d.exists():
         print(" -> Skipping SVD: 2D and 3D plots already exist.")

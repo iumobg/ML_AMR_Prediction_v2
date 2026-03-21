@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+BLAST Annotation Orchestrator — Step 08
+
+This script coordinates the biological validation of the top k-mer features
+identified in Step 07 (07_explainability.py) by delegating to a Nextflow
+pipeline (08_blast_pipeline.nf) that runs two parallel BLAST searches:
+
+  1. CARD Local BLAST:
+     Queries the Comprehensive Antibiotic Resistance Database (CARD).
+     Directly tests whether the top k-mers overlap with documented
+     resistance genes (e.g., gyrA, parC for fluoroquinolones).
+     Requires a pre-built local blastn database.
+
+  2. NCBI Remote BLAST:
+     Queries the full NCBI nucleotide (nt) database over the internet.
+     Captures novel or uncharacterised resistance determinants not yet
+     in CARD. Uses -remote flag — no local database needed.
+
+Why Nextflow?
+    Both BLAST searches are embarrassingly parallel and independent.
+    Nextflow manages the parallel execution, retries, and output staging
+    automatically, while this Python script provides the project-standard
+    CLI experience (config loading, step printing, ✓ checkmarks).
+
+Output Files (inside analysis_results/{antibiotic}/05_explainability/):
+    03_card_blast_results_{antibiotic}.tsv   — CARD local hits
+    04_ncbi_blast_results_{antibiotic}.tsv   — NCBI remote hits
+
+Prerequisite Setup (CARD database):
+    Download CARD nucleotide FASTA:
+        wget https://card.mcmaster.ca/latest/data/nucleotide_fasta_protein_homolog_model.fasta
+    Build blastn database:
+        makeblastdb -in <file>.fasta -dbtype nucl -out data/blast_db/card_nt/card
+"""
+
+# ============================================================================
+# LIBRARY IMPORTS
+# ============================================================================
+import subprocess
+import shutil
+import sys
+import os
+import yaml
+from pathlib import Path
+
+# Ensure the conda environment's bin is on PATH so shutil.which() finds
+# blastn even when this script is launched via the full python interpreter
+# path (which bypasses the activated environment's PATH export).
+_conda_bin = Path(sys.executable).parent
+os.environ['PATH'] = str(_conda_bin) + os.pathsep + os.environ.get('PATH', '')
+
+
+# ============================================================================
+# LOAD CONFIGURATION FROM YAML
+# ============================================================================
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+CONFIG_PATH  = PROJECT_ROOT / "config" / "config.yaml"
+
+if not CONFIG_PATH.exists():
+    raise FileNotFoundError(
+        f"Configuration file not found: {CONFIG_PATH}\n"
+        f"Please ensure config.yaml exists in the config/ directory."
+    )
+
+with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
+    config = yaml.safe_load(f)
+
+# Extract project-level identifiers
+TARGET_ANTIBIOTIC = config['project']['target_antibiotic']
+TOP_N             = config['analysis']['top_n_features']
+
+# Resolve BLAST parameters from config
+blast_cfg   = config.get('blast', {})
+CARD_DB_DIR = PROJECT_ROOT / blast_cfg.get('card_db_dir', 'data/blast_db/card_nt')
+CARD_DB     = CARD_DB_DIR / blast_cfg.get('card_db_name', 'card')
+EVALUE      = blast_cfg.get('evalue',    10)
+WORD_SIZE   = blast_cfg.get('word_size', 11)
+THREADS     = blast_cfg.get('threads',   8)
+
+# Resolve I/O paths using the centralised config keys
+EXPLAINABILITY_DIR = PROJECT_ROOT / config['paths']['dir_05_explainability'].format(
+    antibiotic=TARGET_ANTIBIOTIC
+)
+FASTA_INPUT = EXPLAINABILITY_DIR / f"02_top_features_{TARGET_ANTIBIOTIC}.fasta"
+
+# Nextflow pipeline path
+PIPELINE_PATH = PROJECT_ROOT / "scripts" / "08_blast_pipeline.nf"
+
+# Expected output files (for final confirmation print)
+CARD_OUT  = EXPLAINABILITY_DIR / f"03_card_blast_results_{TARGET_ANTIBIOTIC}.tsv"
+NCBI_OUT  = EXPLAINABILITY_DIR / f"04_ncbi_blast_results_{TARGET_ANTIBIOTIC}.tsv"
+
+
+# ============================================================================
+# MAIN ORCHESTRATION FUNCTION
+# ============================================================================
+def main() -> None:
+    """
+    Orchestrate the BLAST annotation pipeline for AMR k-mer features.
+
+    Workflow:
+        1. Validate tool availability (nextflow, blastn)
+        2. Validate input FASTA from Step 07
+        3. Validate CARD local database
+        4. Execute Nextflow pipeline (CARD + NCBI in parallel)
+        5. Confirm output files were created
+    """
+    print("=" * 80)
+    print(f"BLAST ANNOTATION: {TARGET_ANTIBIOTIC.upper()} — K-MER BIOLOGICAL VALIDATION")
+    print("=" * 80)
+    print(f"  Target antibiotic : {TARGET_ANTIBIOTIC}")
+    print(f"  Top-N features    : {TOP_N}")
+    print(f"  E-value threshold : {EVALUE}")
+    print(f"  Word size         : {WORD_SIZE}")
+    print(f"  BLAST threads     : {THREADS}")
+    print("=" * 80)
+
+    # -------------------------------------------------------------------------
+    # STEP 1: Validate required tools
+    # -------------------------------------------------------------------------
+    print("\n[STEP 1/4] Checking required tool availability...")
+
+    missing_tools = []
+    for tool in ("nextflow", "blastn"):
+        path = shutil.which(tool)
+        if path:
+            print(f"  ✓ {tool:12s} found: {path}")
+        else:
+            print(f"  ✗ {tool:12s} NOT FOUND")
+            missing_tools.append(tool)
+
+    if missing_tools:
+        print("\nERROR: The following required tools are not installed or not on PATH:")
+        for tool in missing_tools:
+            if tool == "nextflow":
+                print("  • nextflow  → Install: https://www.nextflow.io/docs/latest/getstarted.html")
+                print("                Quick:   curl -s https://get.nextflow.io | bash && mv nextflow /usr/local/bin/")
+            elif tool == "blastn":
+                print("  • blastn    → Install BLAST+: https://www.ncbi.nlm.nih.gov/books/NBK569861/")
+                print("                macOS:   brew install blast")
+                print("                conda:   conda install -c bioconda blast")
+        sys.exit(1)
+
+    # -------------------------------------------------------------------------
+    # STEP 2: Validate input FASTA from Step 07
+    # -------------------------------------------------------------------------
+    print("\n[STEP 2/4] Validating input FASTA from Step 07...")
+
+    if not FASTA_INPUT.exists():
+        print(f"  ✗ FASTA not found: {FASTA_INPUT}")
+        print(f"\n  Run feature extraction first:")
+        print(f"    python scripts/07_explainability.py")
+        sys.exit(1)
+
+    fasta_lines = FASTA_INPUT.read_text(encoding='utf-8').strip().splitlines()
+    seq_count   = sum(1 for l in fasta_lines if l.startswith('>'))
+    print(f"  ✓ FASTA input     : {FASTA_INPUT.name}")
+    print(f"  ✓ Sequences       : {seq_count}")
+
+    # -------------------------------------------------------------------------
+    # STEP 3: Validate CARD local database
+    # -------------------------------------------------------------------------
+    print("\n[STEP 3/4] Validating CARD local database...")
+
+    card_pre = CARD_DB.parent / (CARD_DB.name + ".nhr")   # blastn index file
+    if not card_pre.exists():
+        print(f"  ⚠ CARD database not found at: {CARD_DB}")
+        print(f"    CARD local BLAST will fail. To build the database:")
+        print(f"      1. Download: https://card.mcmaster.ca/download")
+        print(f"      2. makeblastdb -in <card.fna> -dbtype nucl -out {CARD_DB}")
+        print(f"    Continuing — NCBI remote BLAST will still run.\n")
+    else:
+        print(f"  ✓ CARD database   : {CARD_DB}")
+
+    # -------------------------------------------------------------------------
+    # STEP 4: Execute Nextflow pipeline
+    # -------------------------------------------------------------------------
+    print("\n[STEP 4/4] Launching Nextflow pipeline (CARD + NCBI in parallel)...")
+    print("=" * 80)
+
+    cmd = [
+        "nextflow", "run", str(PIPELINE_PATH),
+        "--fasta",      str(FASTA_INPUT),
+        "--card_db",    str(CARD_DB),
+        "--outdir",     str(EXPLAINABILITY_DIR),
+        "--antibiotic", TARGET_ANTIBIOTIC,
+        "--threads",    str(THREADS),
+        "--evalue",     str(EVALUE),
+        "--word_size",  str(WORD_SIZE),
+    ]
+
+    print(f"  Command: {' '.join(cmd)}\n")
+
+    # Force English locale for the JVM that Nextflow spawns.
+    # On systems with a Turkish locale, Java's String.toLowerCase() converts
+    # 'I' → 'ı' (dotless-i), which breaks Nextflow's errorStrategy keyword
+    # matching ('ignore' fails because the JVM sees 'ıgnore').
+    import os
+    nxf_env = os.environ.copy()
+    nxf_env['NXF_OPTS'] = nxf_env.get('NXF_OPTS', '') + ' -Duser.language=en -Duser.country=US'
+
+    result = subprocess.run(cmd, cwd=str(PROJECT_ROOT), env=nxf_env)
+
+    if result.returncode != 0:
+        print("\nERROR: Nextflow pipeline exited with a non-zero status.")
+        print(f"  Return code: {result.returncode}")
+        print("  Check Nextflow logs in the .nextflow.log file for details.")
+        sys.exit(result.returncode)
+
+    # -------------------------------------------------------------------------
+    # COMPLETION: Confirm output files
+    # -------------------------------------------------------------------------
+    print("\n" + "=" * 80)
+    print("BLAST ANNOTATION COMPLETE")
+    print("=" * 80)
+    print("\nOutput files:")
+
+    for out_path in (CARD_OUT, NCBI_OUT):
+        if out_path.exists():
+            size_kb = out_path.stat().st_size / 1024
+            print(f"  ✓ {out_path.name}  ({size_kb:.1f} KB)")
+        else:
+            print(f"  ⚠ Not found: {out_path.name}  (check Nextflow logs)")
+
+    print(f"\nAll outputs in: {EXPLAINABILITY_DIR}")
+    print("\nNext steps for biological interpretation:")
+    print("  1. Filter TSVs for pident > 90% and evalue < 1e-10")
+    print("  2. Cross-reference CARD hits with known resistance mechanisms")
+    print("  3. BLAST the NCBI TSV gene names against literature")
+    print("=" * 80)
+
+
+# ============================================================================
+# SCRIPT ENTRY POINT
+# ============================================================================
+if __name__ == "__main__":
+    main()

@@ -57,6 +57,7 @@ from sklearn.metrics import (
 import matplotlib.pyplot as plt
 import seaborn as sns
 import sys
+from sklearn.calibration import calibration_curve
 
 
 # ============================================================================
@@ -83,7 +84,10 @@ N_JOBS = config['xgboost_params'].get('n_jobs', -1)
 # Cross-platform paths (antibiotic-specific) - loaded from global config
 MATRIX_DIR = PROJECT_ROOT / config['paths']['matrix_dir'].format(antibiotic=TARGET_ANTIBIOTIC)
 MODELS_DIR = PROJECT_ROOT / config['paths']['models_dir'].format(antibiotic=TARGET_ANTIBIOTIC)
-OUTPUT_DIR = PROJECT_ROOT / config['paths']['analysis_results_dir'].format(antibiotic=TARGET_ANTIBIOTIC)
+# Output directory — derived from the centralised config (04_evaluation subdir)
+OUTPUT_DIR = PROJECT_ROOT / config['paths']['dir_04_evaluation'].format(
+    antibiotic=TARGET_ANTIBIOTIC
+)
 
 # Create output directory
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -342,7 +346,7 @@ def plot_confusion_matrix_enhanced(y_true, y_pred, output_dir, antibiotic):
     plt.yticks([0.5, 1.5], ['Susceptible', 'Resistant'], rotation=0)
     
     plt.tight_layout()
-    output_path = output_dir / f'confusion_matrix_{antibiotic}.png'
+    output_path = output_dir / f'01_confusion_matrix_{antibiotic}.png'
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
     print(f"  ✓ Confusion matrix saved: {output_path.name}")
@@ -375,7 +379,7 @@ def plot_roc_curve_analysis(y_true, y_prob, output_dir, antibiotic):
     plt.grid(alpha=0.3, linestyle=':', linewidth=0.8)
     
     plt.tight_layout()
-    output_path = output_dir / f'roc_curve_{antibiotic}.png'
+    output_path = output_dir / f'02_roc_curve_{antibiotic}.png'
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
     print(f"  ✓ ROC curve saved: {output_path.name}")
@@ -415,7 +419,7 @@ def plot_precision_recall_curve_analysis(y_true, y_prob, output_dir, antibiotic)
     plt.ylim([0.0, 1.05])
     
     plt.tight_layout()
-    output_path = output_dir / f'precision_recall_curve_{antibiotic}.png'
+    output_path = output_dir / f'03_pr_curve_{antibiotic}.png'
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
     print(f"  ✓ Precision-Recall curve saved: {output_path.name}")
@@ -459,10 +463,56 @@ def plot_threshold_analysis(results_df, output_dir, antibiotic):
     plt.ylim([0.0, 1.0])
     
     plt.tight_layout()
-    output_path = output_dir / f'threshold_analysis_{antibiotic}.png'
+    output_path = output_dir / f'06_threshold_analysis_{antibiotic}.png'
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
     print(f"  ✓ Threshold analysis saved: {output_path.name}")
+
+
+def plot_probability_distribution(y_true, y_prob, output_dir, antibiotic):
+    """Generate KDE plots for predicted probabilities grouped by true class."""
+    plt.figure(figsize=(8, 6))
+
+    sns.kdeplot(y_prob[y_true == 0], fill=True, color='#2E86AB', label='True: Susceptible (0)', alpha=0.5)
+    sns.kdeplot(y_prob[y_true == 1], fill=True, color='#D62246', label='True: Resistant (1)', alpha=0.5)
+
+    plt.axvline(x=0.5, color='black', linestyle='--', linewidth=1.5, label='Threshold (0.5)')
+
+    plt.xlabel('Predicted Probability of Resistance', fontsize=12)
+    plt.ylabel('Density', fontsize=12)
+    plt.title(f'Probability Distribution: {antibiotic.title()} Resistance',
+              fontsize=14, fontweight='bold', pad=20)
+    plt.legend(loc='upper center', fontsize=11)
+    plt.xlim([-0.05, 1.05])
+    plt.grid(alpha=0.3, linestyle=':', linewidth=0.8)
+
+    plt.tight_layout()
+    output_path = output_dir / f'04_probability_distribution_{antibiotic}.png'
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"  ✓ Probability distribution plot saved: {output_path.name}")
+
+
+def plot_calibration_curve_analysis(y_true, y_prob, output_dir, antibiotic):
+    """Generate a reliability diagram (calibration curve)."""
+    prob_true, prob_pred = calibration_curve(y_true, y_prob, n_bins=10, strategy='uniform')
+
+    plt.figure(figsize=(8, 6))
+    plt.plot(prob_pred, prob_true, marker='o', linewidth=2, color='#A23B72', label='XGBoost Model')
+    plt.plot([0, 1], [0, 1], linestyle='--', color='gray', label='Perfectly Calibrated')
+
+    plt.xlabel('Mean Predicted Probability', fontsize=12)
+    plt.ylabel('Fraction of Positives (True Probability)', fontsize=12)
+    plt.title(f'Calibration Curve (Reliability): {antibiotic.title()}',
+              fontsize=14, fontweight='bold', pad=20)
+    plt.legend(loc='best', fontsize=11)
+    plt.grid(alpha=0.3, linestyle=':', linewidth=0.8)
+
+    plt.tight_layout()
+    output_path = output_dir / f'05_calibration_curve_{antibiotic}.png'
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"  ✓ Calibration curve saved: {output_path.name}")
 
 
 def save_comprehensive_metrics(y_true, y_pred, y_prob, best_thresh, output_dir, antibiotic):
@@ -506,7 +556,7 @@ def save_comprehensive_metrics(y_true, y_pred, y_prob, best_thresh, output_dir, 
     }
     
     metrics_df = pd.DataFrame([metrics])
-    output_path = output_dir / f'comprehensive_metrics_{antibiotic}.csv'
+    output_path = output_dir / f'06_comprehensive_metrics_{antibiotic}.csv'
     metrics_df.to_csv(output_path, index=False, encoding='utf-8')
     
     print(f"\n  ✓ Comprehensive metrics saved: {output_path.name}")
@@ -599,7 +649,7 @@ def main():
         
     except FileNotFoundError as e:
         print(f"ERROR: {e}")
-        print("\\nPlease ensure you have run:")
+        print("\nPlease ensure you have run:")
         print("  1. Matrix creation: 03_matrix_construction.py")
         print("  2. Model training: 05_model_training.py")
         sys.exit(1)
@@ -618,14 +668,14 @@ def main():
     # Load test data
     X_test, y_test, ids_test = load_test_data(y_all, chunk_files, test_filenames)
 
-    # Load model
+    # Load model natively as Booster
     try:
         print(f"\nLoading model: {model_path.name}")
-        model = xgb.XGBClassifier(n_jobs=N_JOBS)
+        model = xgb.Booster()
         model.load_model(str(model_path))
         print("  ✓ Model loaded successfully")
-        print(f"  ✓ Number of features: {model.n_features_in_}")
-        print(f"  ✓ Number of trees: {model.n_estimators}")
+        print(f"  ✓ Number of features: {model.num_features()}")
+        print(f"  ✓ Number of trees: {model.num_boosted_rounds()}")
         
     except Exception as e:
         print(f"ERROR: Failed to load model: {e}")
@@ -637,7 +687,8 @@ def main():
     print("\n[STEP 4/6] Generating predictions...")
     
     try:
-        y_prob = model.predict_proba(X_test)[:, 1]
+        dtest = xgb.DMatrix(X_test, nthread=N_JOBS)
+        y_prob = model.predict(dtest)
         print(f"  ✓ Predictions generated for {len(y_prob)} samples")
         print(f"  ✓ Probability range: [{y_prob.min():.4f}, {y_prob.max():.4f}]")
         
@@ -654,7 +705,7 @@ def main():
     y_pred_opt = (y_prob >= best_thresh).astype(int)
     
     # Compute comprehensive metrics
-    print("\\n" + "=" * 80)
+    print("\n" + "=" * 80)
     print("FINAL PERFORMANCE METRICS")
     print("=" * 80)
     
@@ -677,7 +728,7 @@ def main():
     print(f"Optimal Threshold          : {best_thresh:.2f}")
     print("=" * 80)
     
-    print("\\nDetailed Classification Report:")
+    print("\nDetailed Classification Report:")
     print("-" * 80)
     print(classification_report(
         y_test,
@@ -702,7 +753,7 @@ def main():
     ppv = tp / (tp + fp) if (tp + fp) > 0 else 0
     npv = tn / (tn + fn) if (tn + fn) > 0 else 0
     
-    print("\\nClinical Performance Metrics:")
+    print("\nClinical Performance Metrics:")
     print("-" * 80)
     print(f"Sensitivity (True Positive Rate):  {sensitivity:.4f}")
     print("  → Proportion of resistant bacteria correctly identified")
@@ -735,6 +786,8 @@ def main():
     plot_confusion_matrix_enhanced(y_test, y_pred_opt, OUTPUT_DIR, TARGET_ANTIBIOTIC)
     plot_roc_curve_analysis(y_test, y_prob, OUTPUT_DIR, TARGET_ANTIBIOTIC)
     plot_precision_recall_curve_analysis(y_test, y_prob, OUTPUT_DIR, TARGET_ANTIBIOTIC)
+    plot_probability_distribution(y_test, y_prob, OUTPUT_DIR, TARGET_ANTIBIOTIC)
+    plot_calibration_curve_analysis(y_test, y_prob, OUTPUT_DIR, TARGET_ANTIBIOTIC)
     
     print("\n" + "=" * 80)
     print("ALL PUBLICATION-READY OUTPUTS GENERATED")
@@ -743,7 +796,7 @@ def main():
     # ------------------------------------------------------------------------
     # STEP 6: Error Analysis
     # ------------------------------------------------------------------------
-    print("\\n[STEP 6/6] Performing error analysis...")
+    print("\n[STEP 6/6] Performing error analysis...")
     print("=" * 80)
     
     # False Negatives (most critical in medical context)
@@ -762,24 +815,24 @@ def main():
             'Error_Type': 'False_Negative'
         })
         
-        print("\\nTop 10 False Negatives (by probability):")
+        print("\nTop 10 False Negatives (by probability):")
         print(error_df.sort_values('Predicted_Probability').head(10).to_string(index=False))
         
-        error_file = OUTPUT_DIR / "error_analysis_false_negatives.csv"
+        error_file = OUTPUT_DIR / f"07_error_analysis_false_negatives_{TARGET_ANTIBIOTIC}.csv"
         error_df.to_csv(error_file, index=False, encoding='utf-8')
-        print(f"\\n  ✓ Full error analysis saved: {error_file}")
+        print(f"\n  ✓ Full error analysis saved: {error_file}")
     
     # False Positives
     fp_mask = (y_test == 0) & (y_pred_opt == 1)
     fp_count = np.sum(fp_mask)
-    print(f"\\nFalse Positives (Overestimated): {fp_count}")
+    print(f"\nFalse Positives (Overestimated): {fp_count}")
     
-    print("\\n" + "=" * 80)
+    print("\n" + "=" * 80)
     print("ANALYSIS COMPLETE")
     print("=" * 80)
-    print("\\nResults saved to:")
+    print("\nResults saved to:")
     print(f"  {OUTPUT_DIR}")
-    print("\\nNext steps:")
+    print("\nNext steps:")
     print("  1. Review false negatives - these are high-risk predictions")
     print("  2. Consider adjusting threshold if clinical context demands higher sensitivity")
     print("  3. Run feature extraction: 07_explainability.py")
