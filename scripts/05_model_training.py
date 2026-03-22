@@ -40,6 +40,8 @@ from sklearn.metrics import (
 import sys
 import gc
 import random
+import datetime
+import shutil
 
 
 # ============================================================================
@@ -497,6 +499,12 @@ def main():
     try:
         final_model.save_model(str(model_path))
         print(f"\n✓ Model saved: {model_path}")
+        
+        # TIMESTAMP BACKUP
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_model_path = MODELS_DIR / f"xgboost_{TARGET_ANTIBIOTIC}_final_{ts}.json"
+        shutil.copy2(model_path, backup_model_path)
+        print(f"✓ Timestamped Backup Model saved successfully: {backup_model_path.name} in {MODELS_DIR}")
         
         # Save threshold to the antibiotic-specific config
         antibiotic_config['evaluation'] = {

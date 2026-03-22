@@ -46,6 +46,10 @@ Key Data Streams:
 **Dynamic Multiprocessing via Config:**
 The framework utilizes `config/config.yaml` to govern variable generation. By isolating file path structures dynamically based on the target `{antibiotic}` flag, users can launch fully parallel, multi-antibiotic runs without data collision.
 
+**MLOps & Reproducibility:**
+- **MLOps Model Versioning:** Implements safe, timestamped backup copies of Optuna studies and XGBoost models to prevent accidental overwriting and guarantee model provenance.
+- **Publication-Ready Plot Data:** All visualization pipelines automatically export the underlying raw numerical data as `.csv` files alongside `.png` plots, enabling seamless recreation of figures in third-party software (e.g., GraphPad Prism).
+
 ---
 
 ## Pipeline Workflow
@@ -62,6 +66,7 @@ The complete end-to-end execution is governed by a sequence of highly modular an
 | **06** | `06_evaluation.py` | Evaluates accuracy, clinical sensitivity, ROC/PR curves, and dynamic limits. |
 | **07** | `07_explainability.py` | Leverages model **Gain** to unpack the highest impact genomic 21-mers. |
 | **08** | `08_blast_annotation.py` / `08_blast_pipeline.nf` | Annotates highest impact variables against the local CARD & NCBI databases. |
+| **09** | `09_biological_summary.py` | Distills raw BLAST TSVs into a human-readable, publication-ready Markdown report. |
 
 ---
 
@@ -102,4 +107,5 @@ Before spinning up the framework locally, ensure you have the core suite of comm
    python scripts/06_evaluation.py
    python scripts/07_explainability.py
    python scripts/08_blast_annotation.py
+   python scripts/09_biological_summary.py
    ```
