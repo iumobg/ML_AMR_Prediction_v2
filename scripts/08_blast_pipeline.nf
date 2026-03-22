@@ -30,8 +30,8 @@ nextflow.enable.dsl = 2
 // ---------------------------------------------------------------------------
 params.fasta      = ""
 params.card_db    = ""
-params.outdir     = "analysis_results/output/05_explainability"
 params.antibiotic = "unknown"
+params.outdir     = "results/${params.antibiotic}/05_explainability"
 params.threads    = 8
 params.evalue     = 10
 params.word_size  = 11

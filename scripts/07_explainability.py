@@ -55,9 +55,6 @@ TOP_N = config['analysis']['top_n_features']
 # Model filename to analyze
 MODEL_FILE = f"xgboost_{TARGET_ANTIBIOTIC}_final_v2.json"
 
-# Cross-platform paths (antibiotic-specific)
-BASE_DIR = PROJECT_ROOT / "data"
-
 # Antibiotic-specific paths — derived from centralised config keys
 MATRIX_DIR = PROJECT_ROOT / config['paths']['matrix_dir'].format(antibiotic=TARGET_ANTIBIOTIC)
 MODELS_DIR = PROJECT_ROOT / config['paths']['models_dir'].format(antibiotic=TARGET_ANTIBIOTIC)

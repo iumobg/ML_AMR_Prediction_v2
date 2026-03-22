@@ -52,8 +52,7 @@ try:
         config = yaml.safe_load(f)
     TARGET_ANTIBIOTIC = config['project']['target_antibiotic']
 
-    BASE_DIR = PROJECT_ROOT / "data"
-    MATRIX_DIR = BASE_DIR / TARGET_ANTIBIOTIC / "matrix"
+    MATRIX_DIR = PROJECT_ROOT / config['paths']['matrix_dir'].format(antibiotic=TARGET_ANTIBIOTIC)
 
     # Derive output directory from the centralised config key (02_matrix_qc)
     OUTPUT_DIR = PROJECT_ROOT / config['paths']['dir_02_matrix_qc'].format(

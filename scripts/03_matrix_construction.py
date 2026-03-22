@@ -75,17 +75,14 @@ THREADS           = config['preprocessing']['threads']
 # ============================================================================
 # CROSS-PLATFORM COMPATIBLE PATHS (ANTIBIOTIC-SPECIFIC)
 # ============================================================================
-BASE_DIR = PROJECT_ROOT / "data"
-
 # Global paths (shared across all antibiotics)
-RAW_GENOMES_DIR = BASE_DIR / "raw_genomes"
-METADATA_FILE = BASE_DIR / "metadata" / "genome_amr_matrix.csv"
+RAW_GENOMES_DIR = PROJECT_ROOT / config['paths']['raw_genomes_dir']
+METADATA_FILE = PROJECT_ROOT / config['paths']['metadata_file']
 
 # Antibiotic-specific paths
 # K-mer specific directories
-ANTIBIOTIC_DIR = BASE_DIR / TARGET_ANTIBIOTIC
-KMC_OUTPUTS_DIR = BASE_DIR / "global_kmc_outputs"
-MATRIX_OUTPUT_DIR = ANTIBIOTIC_DIR / "matrix"
+KMC_OUTPUTS_DIR = PROJECT_ROOT / config['paths']['kmc_outputs_dir']
+MATRIX_OUTPUT_DIR = PROJECT_ROOT / config['paths']['matrix_dir'].format(antibiotic=TARGET_ANTIBIOTIC)
 TEMP_DIR = KMC_OUTPUTS_DIR / "tmp"
 
 # KMC binaries (global)
@@ -196,7 +193,7 @@ def create_feature_matrix():
         print(f"  ✓ Genomes with {TARGET_ANTIBIOTIC} labels: {len(metadata_filtered)}")
         
         # --- LOAD QC OUTLIERS ---
-        outlier_file = PROJECT_ROOT / "data" / "metadata" / "global_exploration" / "global_qc_outliers.csv"
+        outlier_file = PROJECT_ROOT / config['paths']['dir_global_exploration'] / "global_qc_outliers.csv"
         outlier_ids = set()
         if outlier_file.exists():
             outliers_df = pd.read_csv(outlier_file)

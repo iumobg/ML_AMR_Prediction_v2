@@ -66,12 +66,11 @@ MIN_COUNT = 1  # Fixed for assembled genomes (not in config)
 # ============================================================================
 # CROSS-PLATFORM COMPATIBLE PATHS (ANTIBIOTIC-SPECIFIC)
 # ============================================================================
-BASE_DIR = PROJECT_ROOT / "data"
-RAW_GENOMES_DIR = BASE_DIR / "raw_genomes"  # Global: shared across all antibiotics
-AMR_MATRIX_PATH = BASE_DIR / "metadata" / "genome_amr_matrix.csv"  # Global metadata matrix
+RAW_GENOMES_DIR = PROJECT_ROOT / config['paths']['raw_genomes_dir']
+AMR_MATRIX_PATH = PROJECT_ROOT / config['paths']['metadata_file']
 
 # Global output directories
-KMC_OUTPUTS_DIR = PROJECT_ROOT / config['paths']['data_dir'] / "global_kmc_outputs"
+KMC_OUTPUTS_DIR = PROJECT_ROOT / config['paths']['kmc_outputs_dir']
 TEMP_DIR = KMC_OUTPUTS_DIR / "tmp"
 
 # KMC binary location

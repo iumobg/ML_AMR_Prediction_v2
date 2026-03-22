@@ -54,9 +54,9 @@ try:
     THREADS = config['preprocessing']['threads']
     
     BASE_DIR = PROJECT_ROOT / "data"
-    KMC_OUTPUTS_DIR = BASE_DIR / "global_kmc_outputs"
-    RAW_GENOMES_DIR = BASE_DIR / "raw_genomes"
-    OUTPUT_DIR = PROJECT_ROOT / "data" / "metadata" / "global_exploration"
+    KMC_OUTPUTS_DIR = PROJECT_ROOT / config['paths']['kmc_outputs_dir']
+    RAW_GENOMES_DIR = PROJECT_ROOT / config['paths']['raw_genomes_dir']
+    OUTPUT_DIR = PROJECT_ROOT / config['paths']['dir_global_exploration']
     TEMP_DIR = KMC_OUTPUTS_DIR / "tmp"
     
     # KMC tools path

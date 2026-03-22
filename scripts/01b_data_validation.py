@@ -62,7 +62,7 @@ try:
         config = yaml.safe_load(f)
     TARGET_ANTIBIOTIC = config.get('project', {}).get('target_antibiotic', 'unknown')
     MATRIX_FILE = PROJECT_ROOT / config['paths']['metadata_file']
-    OUTPUT_DIR = PROJECT_ROOT / "analysis_results" / "data_exploration"
+    OUTPUT_DIR = PROJECT_ROOT / config['paths']['dir_01_data_exploration'].format(antibiotic=TARGET_ANTIBIOTIC)
 except Exception as e:
     print(f"ERROR loading config: {e}")
     sys.exit(1)
