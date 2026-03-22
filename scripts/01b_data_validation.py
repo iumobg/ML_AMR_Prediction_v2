@@ -143,6 +143,11 @@ def plot_resistance_distribution(df_clean):
     plt.tight_layout()
     output_path = OUTPUT_DIR / "01_resistance_distribution.png"
     plt.savefig(output_path)
+    
+    # Save underlying data to CSV
+    csv_path = OUTPUT_DIR / "01_resistance_distribution.csv"
+    stats_df.to_csv(csv_path, index=False)
+    
     plt.close()
 
     del stats, stats_df, melted_df, ax
@@ -172,6 +177,11 @@ def plot_missing_data_heatmap(df_clean):
     plt.tight_layout()
     output_path = OUTPUT_DIR / "02_missing_data_heatmap.png"
     plt.savefig(output_path)
+    
+    # Save underlying data to CSV
+    csv_path = OUTPUT_DIR / "02_missing_data_heatmap.csv"
+    plot_df.notna().astype(int).to_csv(csv_path, index=True, index_label='Genome_Index')
+    
     plt.close()
 
     del plot_df, cmap, cols_sorted
@@ -217,6 +227,11 @@ def plot_antibiotic_classes(df_clean):
     plt.tight_layout()
     output_path = OUTPUT_DIR / "03_class_distribution_donut.png"
     plt.savefig(output_path)
+    
+    # Save underlying data to CSV
+    csv_path = OUTPUT_DIR / "03_class_distribution_donut.csv"
+    pd.DataFrame({'Antibiotic_Class': labels, 'Genome_Count': sizes}).to_csv(csv_path, index=False)
+    
     plt.close()
 
     del class_counts, labels, sizes, colors, explode, fig
@@ -280,6 +295,11 @@ def plot_target_antibiotic_deepdive(df_clean, target):
     plt.tight_layout()
     output_path = OUTPUT_DIR / f"04_target_deepdive_{target.replace('/', '_')}.png"
     plt.savefig(output_path)
+    
+    # Save underlying data to CSV
+    csv_path = OUTPUT_DIR / f"04_target_deepdive_{target.replace('/', '_')}.csv"
+    pd.DataFrame({'Phenotype': ['Susceptible (0)', 'Resistant (1)'], 'Count': [sus_count, res_count]}).to_csv(csv_path, index=False)
+    
     plt.close()
 
     del target_data, ax
@@ -345,6 +365,11 @@ def plot_co_occurrence_heatmap(df_clean):
         
         output_path = OUTPUT_DIR / "05_co_occurrence_clustermap.png"
         cg.savefig(output_path)
+        
+        # Save underlying data to CSV
+        csv_path = OUTPUT_DIR / "05_co_occurrence_clustermap.csv"
+        corr_matrix.to_csv(csv_path, index=True)
+        
         plt.close(cg.fig)
         
         del df_corr, corr_matrix, cg 

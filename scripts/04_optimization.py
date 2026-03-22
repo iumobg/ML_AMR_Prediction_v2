@@ -49,6 +49,8 @@ from pathlib import Path
 from scipy.sparse import load_npz, vstack
 from sklearn.model_selection import train_test_split
 import sys
+import datetime
+import shutil
 
 
 # ============================================================================
@@ -547,6 +549,16 @@ def generate_optuna_plots(study, target_antibiotic):
         plt.tight_layout()
         hist_path = output_dir / f"01_optuna_history_{target_antibiotic}.png"
         plt.savefig(hist_path, dpi=300, bbox_inches='tight')
+        
+        # Save data to CSV
+        history_df = pd.DataFrame([{
+            'Trial_Number': t.number,
+            'Objective_Value': t.value,
+            'State': t.state.name
+        } for t in study.trials if t.value is not None])
+        hist_csv_path = output_dir / f"01_optuna_history_{target_antibiotic}.csv"
+        history_df.to_csv(hist_csv_path, index=False)
+        
         plt.close(fig1)
         print(f"  ✓ Saved history plot: {hist_path.name}")
         
@@ -557,6 +569,19 @@ def generate_optuna_plots(study, target_antibiotic):
         plt.tight_layout()
         imp_path = output_dir / f"02_optuna_importance_{target_antibiotic}.png"
         plt.savefig(imp_path, dpi=300, bbox_inches='tight')
+        
+        # Save data to CSV
+        try:
+            importances = optuna.importance.get_param_importances(study)
+            imp_df = pd.DataFrame({
+                'Hyperparameter': list(importances.keys()),
+                'Importance': list(importances.values())
+            })
+            imp_csv_path = output_dir / f"02_optuna_importance_{target_antibiotic}.csv"
+            imp_df.to_csv(imp_csv_path, index=False)
+        except Exception:
+            pass
+            
         plt.close(fig2)
         print(f"  ✓ Saved importance plot: {imp_path.name}")
         
@@ -715,6 +740,12 @@ def main():
             try:
                 joblib.dump(study, study_path)
                 print(f"  ✓ Full study object saved: {study_path}")
+                
+                # TIMESTAMP BACKUP
+                ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                backup_study_path = MODELS_DIR / f"optuna_study_{TARGET_ANTIBIOTIC}_{ts}.pkl"
+                shutil.copy2(study_path, backup_study_path)
+                print(f"  ✓ Backup study object saved: {backup_study_path}")
             except Exception as e:
                 print(f"WARNING: Failed to save study object: {e}")
             

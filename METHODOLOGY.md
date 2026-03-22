@@ -255,6 +255,14 @@ $$\eta \leq \frac{1}{\sqrt{T_{\text{total}}}}$$
 
 ensuring the cumulative update magnitude scales appropriately with the number of boosting rounds.
 
+### 3.5 Reproducibility & MLOps Best Practices
+
+#### Timestamp Versioning and Artifact Provenance
+To safeguard high-cost computational artifacts, the optimization (`04_optimization.py`) and training (`05_model_training.py`) scripts employ strict timestamp versioning. Each Optuna study database and XGBoost model binary is backed up with a precise timestamp upon creation. This prevents accidental overwriting during hyperparameter tuning iterations and creates a clear, reproducible lineage for every model deployed.
+
+#### Publication-Ready Source Data Extraction
+For maximum scientific transparency and reproducibility, all visualization modules (e.g., `06_evaluation.py`) are engineered to export the exact numerical arrays underlying any generated plot. Alongside every `.png` figure, a corresponding raw `.csv` file is exported, providing the source data required for researchers to independently redraw and modify figures in third-party software such as GraphPad Prism or R.
+
 ---
 
 ## 4. Explainable AI and Biological Validation
@@ -270,6 +278,10 @@ To translate mathematical importance into biological relevance, we employ a dual
 1. **CARD Local BLAST:** We query the top features against a rigorously curated local installation of the Comprehensive Antibiotic Resistance Database (CARD). This step rapidly identifies acquired resistance mechanisms such as horizontal gene transfer events, specific efflux pumps (e.g., *msbA*), and plasmid-mediated resistance determinants (e.g., *OXA* variants).
 2. **NCBI Remote BLAST (`nt` database):** For zero-alignment, reference-free discovery of chromosomal mutations, features are queried against the massive NCBI `nt` database. This alignment-free approach enables the autonomous discovery of core-genome point mutations (SNPs), seamlessly identifying phenomena such as the Quinolone Resistance-Determining Region (QRDR) mutations within the *gyrA* and *parC* genes.
 
+### 4.3 Automated Biological Reporting
+
+To bridge the gap between raw alignment metrics (BLAST `outfmt 6` TSV format) and final biological discovery, an automated reporting mechanism (`09_biological_summary.py`) distills the pipeline's outputs into a synthesized summary. By enforcing strict FASTA header ID matching (e.g., `Rank_1|Score_154.4288|Feature_...`) and implementing regex-based text mining, the script filters low-quality alignments and extracts precise AMR determinants. It cleanly isolates specific resistance symbols (like `OXA-909` or `msbA`) from CARD and unambiguous species/strain identifiers from NCBI, ultimately generating a human-readable, publication-ready Markdown report.
+
 ---
 
 ## Summary of Design Decisions
@@ -284,6 +296,9 @@ To translate mathematical importance into biological relevance, we employ a dual
 | Stratified linspace chunk selection | Biased mini-batch resistance ratios | Sorted-by-ratio linspace chunk indexing |
 | Epoch-based shuffled training | Catastrophic forgetting in sequential learning | Per-epoch random permutation of chunk order |
 | Nextflow Dual-BLAST (CARD + NCBI) | Black-box ML lack of biological interpretability | Asynchronous pipeline mapping mathematical Gain scores back to known physical AMR mechanisms (SNPs & Plasmids). |
+| MLOps Artifact Versioning | Accidental loss of high-cost optimization and model binaries | Strict timestamp-based backup system protecting historical Optuna studies and models. |
+| Source Data Extraction | Opaque, irreproducible numerical plots | Automated parallel export of plot arrays to `.csv` for transparent third-party rendering. |
+| Automated Biological Reporting | Raw BLAST TSV outputs are unreadable and cluttered | Regex-based `09_biological_summary.py` script distills raw data into synthesized Markdown reports. |
 
 ---
 

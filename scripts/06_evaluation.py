@@ -348,6 +348,16 @@ def plot_confusion_matrix_enhanced(y_true, y_pred, output_dir, antibiotic):
     plt.tight_layout()
     output_path = output_dir / f'01_confusion_matrix_{antibiotic}.png'
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    
+    # Save data to CSV
+    tn, fp, fn, tp = cm.ravel()
+    cm_df = pd.DataFrame({
+        'Actual': ['Susceptible', 'Susceptible', 'Resistant', 'Resistant'],
+        'Predicted': ['Susceptible', 'Resistant', 'Susceptible', 'Resistant'],
+        'Count': [tn, fp, fn, tp]
+    })
+    cm_df.to_csv(output_dir / f'01_confusion_matrix_{antibiotic}.csv', index=False)
+    
     plt.close()
     print(f"  ✓ Confusion matrix saved: {output_path.name}")
 
@@ -381,6 +391,16 @@ def plot_roc_curve_analysis(y_true, y_prob, output_dir, antibiotic):
     plt.tight_layout()
     output_path = output_dir / f'02_roc_curve_{antibiotic}.png'
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    
+    # Save data to CSV
+    fpr, tpr, roc_thresh = roc_curve(y_true, y_prob)
+    roc_df = pd.DataFrame({
+        'False_Positive_Rate': fpr,
+        'True_Positive_Rate': tpr,
+        'Threshold': roc_thresh
+    })
+    roc_df.to_csv(output_dir / f'02_roc_curve_{antibiotic}.csv', index=False)
+    
     plt.close()
     print(f"  ✓ ROC curve saved: {output_path.name}")
 
@@ -421,6 +441,17 @@ def plot_precision_recall_curve_analysis(y_true, y_prob, output_dir, antibiotic)
     plt.tight_layout()
     output_path = output_dir / f'03_pr_curve_{antibiotic}.png'
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    
+    # Save data to CSV
+    precision_pts, recall_pts, pr_thresh = precision_recall_curve(y_true, y_prob)
+    thresh_array = list(pr_thresh) + [1.0]
+    pr_df = pd.DataFrame({
+        'Recall': recall_pts,
+        'Precision': precision_pts,
+        'Threshold': thresh_array
+    })
+    pr_df.to_csv(output_dir / f'03_pr_curve_{antibiotic}.csv', index=False)
+    
     plt.close()
     print(f"  ✓ Precision-Recall curve saved: {output_path.name}")
 
@@ -489,6 +520,14 @@ def plot_probability_distribution(y_true, y_prob, output_dir, antibiotic):
     plt.tight_layout()
     output_path = output_dir / f'04_probability_distribution_{antibiotic}.png'
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    
+    # Save data to CSV
+    prob_df = pd.DataFrame({
+        'True_Label': y_true,
+        'Predicted_Probability': y_prob
+    })
+    prob_df.to_csv(output_dir / f'04_probability_distribution_{antibiotic}.csv', index=False)
+    
     plt.close()
     print(f"  ✓ Probability distribution plot saved: {output_path.name}")
 
@@ -511,6 +550,15 @@ def plot_calibration_curve_analysis(y_true, y_prob, output_dir, antibiotic):
     plt.tight_layout()
     output_path = output_dir / f'05_calibration_curve_{antibiotic}.png'
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    
+    # Save data to CSV
+    prob_true, prob_pred = calibration_curve(y_true, y_prob, n_bins=10, strategy='uniform')
+    cal_df = pd.DataFrame({
+        'Mean_Predicted_Probability': prob_pred,
+        'Fraction_Positives': prob_true
+    })
+    cal_df.to_csv(output_dir / f'05_calibration_curve_{antibiotic}.csv', index=False)
+    
     plt.close()
     print(f"  ✓ Calibration curve saved: {output_path.name}")
 
