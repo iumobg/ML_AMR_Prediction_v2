@@ -5,7 +5,11 @@ from pathlib import Path
 import re
 import sys
 
-def load_config(config_path="config/config.yaml"):
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+def load_config(config_path=None):
+    if config_path is None:
+        config_path = PROJECT_ROOT / "config" / "config.yaml"
     try:
         with open(config_path, "r") as f:
             return yaml.safe_load(f)
@@ -53,16 +57,13 @@ def main():
     antibiotic = config['project']['target_antibiotic']
     
     # Paths
-    try:
-        explain_dir_template = config['paths']['dir_05_explainability']
-        if "{antibiotic}" in explain_dir_template:
-            explain_dir_path = explain_dir_template.format(antibiotic=antibiotic)
-        else:
-            explain_dir_path = explain_dir_template
-    except KeyError:
-        explain_dir_path = f"results/{antibiotic}/05_explainability"
+    explain_dir_template = config['paths']['dir_05_explainability']
+    if "{antibiotic}" in explain_dir_template:
+        explain_dir_path = explain_dir_template.format(antibiotic=antibiotic)
+    else:
+        explain_dir_path = explain_dir_template
 
-    explain_dir = Path(explain_dir_path)
+    explain_dir = PROJECT_ROOT / explain_dir_path
     if not explain_dir.exists():
         print(f"Error: Directory {explain_dir} does not exist.")
         sys.exit(1)

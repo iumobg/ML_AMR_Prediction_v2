@@ -95,16 +95,12 @@ BASE_PARAMS = {
     'max_bin': 2  # CRITICAL RAM FIX: 0/1 binary data does not need 256 bins!
 }
 
-# Cross-platform paths using pathlib
-BASE_DIR = PROJECT_ROOT / "data"
-
-# Antibiotic-specific paths
-ANTIBIOTIC_DIR = BASE_DIR / TARGET_ANTIBIOTIC
-MATRIX_DIR = ANTIBIOTIC_DIR / "matrix"
+# Cross-platform paths using config
+MATRIX_DIR = PROJECT_ROOT / config['paths']['matrix_dir'].format(antibiotic=TARGET_ANTIBIOTIC)
 
 # Output directories (antibiotic-specific)
-MODELS_DIR = PROJECT_ROOT / "models" / TARGET_ANTIBIOTIC
-LOGS_DIR = PROJECT_ROOT / "logs" / TARGET_ANTIBIOTIC
+MODELS_DIR = PROJECT_ROOT / config['paths']['models_dir'].format(antibiotic=TARGET_ANTIBIOTIC)
+LOGS_DIR = PROJECT_ROOT / config['paths']['logs_dir'].format(antibiotic=TARGET_ANTIBIOTIC)
 
 # Create output directories
 MODELS_DIR.mkdir(parents=True, exist_ok=True)

@@ -15,7 +15,7 @@
 project:
   name: "AMR_Genomic_Project"
   description: "Machine learning-based antimicrobial resistance prediction using k-mer features"
-  target_antibiotic: "ciprofloxacin"  # Primary antibiotic for analysis
+  target_antibiotic: "ampicillin"  # Primary antibiotic for analysis
   organism: "Escherichia coli"  # Target organism
   model: "xgboost"  # ML model
   version: "M4-pro"
@@ -46,6 +46,7 @@ paths:
   raw_genomes_dir:  "data/raw/raw_genomes"              # Immutable genome assemblies
   metadata_file:    "data/external/metadata/genome_amr_matrix.csv"  # AMR phenotype labels
   kmc_outputs_dir:  "data/interim/global_kmc_outputs"   # KMC binary databases
+  dir_global_exploration: "results/global_exploration"  # Global QC and validation outputs
 
   # ── Antibiotic-specific (resolved with {antibiotic} placeholder) ───────────
   matrix_dir:           "data/processed/{antibiotic}/matrix"  # Feature matrices & labels

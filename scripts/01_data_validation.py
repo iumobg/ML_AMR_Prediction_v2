@@ -56,7 +56,7 @@ except Exception:
 if config:
     MATRIX_FILE = PROJECT_ROOT / config['paths']['metadata_file']
     GENOMES_DIR = PROJECT_ROOT / config['paths']['raw_genomes_dir']
-    REPORT_PATH = MATRIX_FILE.parent / "validation_report.txt"
+    REPORT_PATH = PROJECT_ROOT / config['paths']['dir_global_exploration'] / "validation_report.txt"
 else:
     BASE_DIR = PROJECT_ROOT / "data"
     MATRIX_FILE = BASE_DIR / "metadata" / "genome_amr_matrix.csv"
