@@ -68,7 +68,7 @@ def main():
         print(f"Error: Directory {explain_dir} does not exist.")
         sys.exit(1)
         
-    csv_file = explain_dir / f"01_top_features_{antibiotic}.csv"
+    csv_file = explain_dir / f"01_top_50_features_{antibiotic}.csv"
     card_file = explain_dir / f"03_card_blast_results_{antibiotic}.tsv"
     ncbi_file = explain_dir / f"04_ncbi_blast_results_{antibiotic}.tsv"
     out_file = explain_dir / "05_final_biological_report.md"

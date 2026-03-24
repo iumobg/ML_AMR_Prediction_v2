@@ -340,6 +340,7 @@ def plot_confusion_matrix_enhanced(y_true, y_pred, output_dir, antibiotic):
     
     plt.title(f'Confusion Matrix: {antibiotic.title()} Resistance Prediction', 
               fontsize=14, fontweight='bold', pad=20)
+    plt.suptitle("(Threshold determined by Youden's J)", fontsize=9, color='gray', y=0.01)
     plt.ylabel('True Label', fontsize=12)
     plt.xlabel('Predicted Label', fontsize=12)
     plt.xticks([0.5, 1.5], ['Susceptible', 'Resistant'], rotation=0)
@@ -500,14 +501,15 @@ def plot_threshold_analysis(results_df, output_dir, antibiotic):
     print(f"  ✓ Threshold analysis saved: {output_path.name}")
 
 
-def plot_probability_distribution(y_true, y_prob, output_dir, antibiotic):
+def plot_probability_distribution(y_true, y_prob, output_dir, antibiotic, threshold=0.5):
     """Generate KDE plots for predicted probabilities grouped by true class."""
     plt.figure(figsize=(8, 6))
 
     sns.kdeplot(y_prob[y_true == 0], fill=True, color='#2E86AB', label='True: Susceptible (0)', alpha=0.5)
     sns.kdeplot(y_prob[y_true == 1], fill=True, color='#D62246', label='True: Resistant (1)', alpha=0.5)
 
-    plt.axvline(x=0.5, color='black', linestyle='--', linewidth=1.5, label='Threshold (0.5)')
+    plt.axvline(x=threshold, color='black', linestyle='--', linewidth=1.5,
+                label=f"Optimal Threshold = {threshold:.4f} (Youden's J)")
 
     plt.xlabel('Predicted Probability of Resistance', fontsize=12)
     plt.ylabel('Density', fontsize=12)
@@ -745,9 +747,41 @@ def main():
         sys.exit(1)
     
     # ------------------------------------------------------------------------
-    # STEP 5: Applying Unbiased Threshold and Performance Evaluation
+    # STEP 4b: Dynamic Optimal Threshold via Youden's J Statistic
     # ------------------------------------------------------------------------
-    print("\n[STEP 5/6] Evaluating performance with unbiased training threshold...")
+    fpr_roc, tpr_roc, roc_thresholds = roc_curve(y_test, y_prob)
+    youden_j = tpr_roc - fpr_roc
+    optimal_idx = np.argmax(youden_j)
+    optimal_threshold = float(roc_thresholds[optimal_idx])
+    
+    print(f"\n✓ Dynamically calculated optimal clinical threshold (Youden's J): {optimal_threshold:.4f}")
+    print(f"  (Replaces config default: {best_thresh:.4f})")
+
+    # Persist the new threshold back into config_{antibiotic}.yaml
+    antibiotic_config_path = PROJECT_ROOT / "config" / f"config_{TARGET_ANTIBIOTIC}.yaml"
+    try:
+        with open(antibiotic_config_path, 'r', encoding='utf-8') as f:
+            ab_config = yaml.safe_load(f)
+        
+        if 'evaluation' not in ab_config:
+            ab_config['evaluation'] = {}
+        ab_config['evaluation']['optimal_threshold'] = round(optimal_threshold, 4)
+        ab_config['evaluation']['threshold_type'] = "Youden's J Statistic (Maximized Sensitivity/Specificity)"
+        
+        with open(antibiotic_config_path, 'w', encoding='utf-8') as f:
+            yaml.safe_dump(ab_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        
+        print(f"✓ Updated clinical threshold saved to config_{TARGET_ANTIBIOTIC}.yaml")
+    except Exception as e:
+        print(f"WARNING: Could not persist threshold to config: {e}")
+    
+    # Use optimal_threshold as the operative threshold from this point forward
+    best_thresh = optimal_threshold
+    
+    # ------------------------------------------------------------------------
+    # STEP 5: Applying Optimal Threshold and Performance Evaluation
+    # ------------------------------------------------------------------------
+    print("\n[STEP 5/6] Evaluating performance with Youden's J optimal threshold...")
     print(f"  Applying Threshold: {best_thresh:.4f}")
     
     y_pred_opt = (y_prob >= best_thresh).astype(int)
@@ -834,7 +868,7 @@ def main():
     plot_confusion_matrix_enhanced(y_test, y_pred_opt, OUTPUT_DIR, TARGET_ANTIBIOTIC)
     plot_roc_curve_analysis(y_test, y_prob, OUTPUT_DIR, TARGET_ANTIBIOTIC)
     plot_precision_recall_curve_analysis(y_test, y_prob, OUTPUT_DIR, TARGET_ANTIBIOTIC)
-    plot_probability_distribution(y_test, y_prob, OUTPUT_DIR, TARGET_ANTIBIOTIC)
+    plot_probability_distribution(y_test, y_prob, OUTPUT_DIR, TARGET_ANTIBIOTIC, threshold=best_thresh)
     plot_calibration_curve_analysis(y_test, y_prob, OUTPUT_DIR, TARGET_ANTIBIOTIC)
     
     print("\n" + "=" * 80)

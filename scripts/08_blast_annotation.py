@@ -83,7 +83,7 @@ THREADS     = blast_cfg.get('threads',   8)
 EXPLAINABILITY_DIR = PROJECT_ROOT / config['paths']['dir_05_explainability'].format(
     antibiotic=TARGET_ANTIBIOTIC
 )
-FASTA_INPUT = EXPLAINABILITY_DIR / f"02_top_features_{TARGET_ANTIBIOTIC}.fasta"
+FASTA_INPUT = EXPLAINABILITY_DIR / f"02_top_50_features_{TARGET_ANTIBIOTIC}.fasta"
 
 # Nextflow pipeline path
 PIPELINE_PATH = PROJECT_ROOT / "scripts" / "08_blast_pipeline.nf"
