@@ -15,7 +15,7 @@
 project:
   name: "AMR_Genomic_Project"
   description: "Machine learning-based antimicrobial resistance prediction using k-mer features"
-  target_antibiotic: "ampicillin"  # Primary antibiotic for analysis
+  target_antibiotic: "gentamicin"  # Primary antibiotic for analysis
   organism: "Escherichia coli"  # Target organism
   model: "xgboost"  # ML model
   version: "M4-pro"
@@ -95,7 +95,7 @@ training:
   
   # Hyperparameter optimization
   n_trials: 25  # Number of Optuna optimization trials
-  optuna_fraction: 0.17  # Fraction of training chunks loaded into RAM during Bayesian opt (25%)
+  optuna_fraction: 0.2  # Fraction of training chunks loaded into RAM during Bayesian opt (25%)
   optimization_metric: "auc"  # Metric to optimize (auc, accuracy, f1)
 
 # ----------------------------------------------------------------------------
