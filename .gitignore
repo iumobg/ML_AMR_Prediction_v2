@@ -7,6 +7,7 @@
 # ===========================================================================
 WORKSPACE_TREE.txt
 generate_workspace_tree.py
+technical_review_report.md
 
 # ============================================================================
 # RAW DATA & GENOMIC FILES
