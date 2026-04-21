@@ -35,6 +35,8 @@ technical_review_report.md
 # FEATURE MATRICES & LABELS
 # ============================================================================
 *.npz
+# Large k-mer feature matrix files (exceed GitHub's 100MB limit)
+data/processed/*/matrix/features.txt
 
 # ============================================================================
 # MODELS
