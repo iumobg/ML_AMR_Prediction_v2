@@ -15,56 +15,82 @@
 project:
   name: "AMR_Genomic_Project"
   description: "Machine learning-based antimicrobial resistance prediction using k-mer features"
-  target_antibiotic: "gentamicin"  # Primary antibiotic for analysis
-  organism: "Escherichia coli"  # Target organism
+  target_antibiotic: "ampicillin"  # Primary antibiotic for analysis
+  organism: "ecoli"  # Organism registry slug (see config/registry/organisms.yaml)
+  # Human-readable names live in the registry (organisms.yaml `display_name`),
+  # which is what the code reads — there is deliberately no `organism_display`
+  # key here to drift out of sync with it.
   model: "xgboost"  # ML model
-  version: "M4-pro"
+  version: "0.7.1"  # aligned to the KB schema (lib/kb_schema.KB_SCHEMA_VERSION)
+
+# Registry file locations are NOT configurable: lib/registry.py resolves
+# config/registry/{organisms,antibiotics}.yaml relative to PROJECT_ROOT. An
+# earlier `registry:` block here listed those paths as if they were settings —
+# editing them changed nothing, which is worse than not offering the knob.
 
 # ----------------------------------------------------------------------------
-# DIRECTORY PATHS (Relative to project root)
+# DIRECTORY PATHS — organism-aware templates ({organism}/{antibiotic})
 # ----------------------------------------------------------------------------
-# All paths use forward slashes for cross-platform compatibility
-# Absolute paths or ~ (home directory) can also be used
-#
-# MULTI-ANTIBIOTIC ARCHITECTURE:
-# Changing 'target_antibiotic' automatically creates isolated directory structures:
-# - data/processed/{antibiotic}/matrix/
-# - models/{antibiotic}/
-# - results/{antibiotic}/
-# - logs/{antibiotic}/
-#
-# Cookiecutter Data Science layout:
-# - data/raw/raw_genomes/       — original, immutable genome assemblies
-# - data/external/metadata/     — AMR phenotype labels
-# - data/external/blast_db/     — third-party databases (CARD)
-# - data/interim/               — intermediate transformations (k-mer DBs)
-# - data/processed/             — final, canonical feature matrices
-# - results/                    — all analysis outputs (replaces analysis_results/)
-paths:
-  # ── Global (shared across all antibiotics) ────────────────────────────────
-  data_dir:         "data"
-  raw_genomes_dir:  "data/raw/raw_genomes"              # Immutable genome assemblies
-  metadata_file:    "data/external/metadata/genome_amr_matrix.csv"  # AMR phenotype labels
-  kmc_outputs_dir:  "data/interim/global_kmc_outputs"   # KMC binary databases
-  dir_global_exploration: "results/global_exploration"  # Global QC and validation outputs
+# Consumed by scripts/lib/config.py resolve_path(). Every numbered script now
+# resolves its paths from here. (The legacy single-organism `paths:` block was
+# removed 2026-07-13 — it was dead: paths_organism is a superset and resolve_path
+# checks it first, so the fallback never triggered.) External tools (kmc) prefer
+# PATH via resolve_tool; the kmc_bin entries are a Darwin-only bundled fallback.
+paths_organism:
+  # ── Global / shared (organism-independent — NOT moved by the migration) ────
+  data_dir:               "data"
+  kmc_bin:                "bin/bin/kmc"
+  kmc_tools_bin:          "bin/bin/kmc_tools"
 
-  # ── Antibiotic-specific (resolved with {antibiotic} placeholder) ───────────
-  matrix_dir:           "data/processed/{antibiotic}/matrix"  # Feature matrices & labels
-  logs_dir:             "logs/{antibiotic}"                    # Processing logs
-  models_dir:           "models/{antibiotic}"                  # Trained models
-  analysis_results_dir: "results/{antibiotic}"                 # Analysis outputs
+  # Global QC / validation outputs are now ORGANISM-SCOPED so two organisms do
+  # not overwrite each other's validation_report.txt / global_qc_outliers.csv.
+  dir_global_exploration: "results/{organism}/global_exploration"
 
-  # Standardised, numbered analysis sub-directories (created on demand by each script)
-  # Sequentially numbered so output folders sort naturally and reproduce the pipeline order.
-  dir_01_data_exploration:   "results/{antibiotic}/01_data_exploration"
-  dir_02_matrix_qc:          "results/{antibiotic}/02_matrix_qc"
-  dir_03_model_optimization: "results/{antibiotic}/03_model_optimization"
-  dir_04_evaluation:         "results/{antibiotic}/04_evaluation"
-  dir_05_explainability:     "results/{antibiotic}/05_explainability"
+  # ── Organism-scoped ────────────────────────────────────────────────────────
+  raw_genomes_dir:  "data/raw/{organism}/genomes"
+  metadata_file:    "data/external/{organism}/metadata/amr_phenotypes.csv"
+  kmc_outputs_dir:  "data/interim/{organism}/kmc_outputs"
+  # PopPUNK lineage labels (02c) — organism-level, antibiotic-independent (one
+  # clustering reused by every antibiotic's lineage-aware CV).
+  lineage_dir:      "data/processed/{organism}/lineage"
 
-  # ── External tool paths (system-specific) ─────────────────────────────────
-  kmc_bin:       "bin/bin/kmc"        # Relative to project root
-  kmc_tools_bin: "bin/bin/kmc_tools"  # Relative to project root
+  # ── Organism + antibiotic-scoped ───────────────────────────────────────────
+  matrix_dir:           "data/processed/{organism}/{antibiotic}/matrix"
+  models_dir:           "models/{organism}/{antibiotic}"
+  logs_dir:             "logs/{organism}/{antibiotic}"
+  dir_01_data_exploration:   "results/{organism}/{antibiotic}/01_data_exploration"
+  dir_02_matrix_qc:          "results/{organism}/{antibiotic}/02_matrix_qc"
+  dir_03_model_optimization: "results/{organism}/{antibiotic}/03_model_optimization"
+  dir_04_evaluation:         "results/{organism}/{antibiotic}/04_evaluation"
+  dir_05_explainability:     "results/{organism}/{antibiotic}/05_explainability"
+  experiment_config:    "config/experiments/{organism}/config_{antibiotic}.yaml"
+
+  # MLOps run metadata (SCALE_MLOPS_PLAN.md §7)
+  run_dir:              "runs/{organism}/{antibiotic}/{run_id}"
+
+# ----------------------------------------------------------------------------
+# PROVENANCE (reproducibility / future Knowledge Base — SCALE_MLOPS_PLAN.md §4.1)
+# ----------------------------------------------------------------------------
+provenance:
+  card_version:     "4.0.1"   # CARD DB version used for BLAST annotation (citeable)
+  # kb_schema_version deliberately NOT here: it lives in code
+  # (lib/kb_schema.KB_SCHEMA_VERSION) and collect_versions reads it from there.
+  # As a config key it silently rotted to 0.6.1 while the schema moved to 0.7.1 —
+  # and run_metadata copied that stale value INTO the KB, so the KB misreported
+  # its own schema. One source, not two.
+  # NCBI Entrez identity is configured under the `ncbi:` section below
+  # (entrez_email / api_key); it is the single source for Step 09.
+
+# ----------------------------------------------------------------------------
+# METADATA / PHENOTYPE LABELLING (step 00a cleaning — lib/bvbrc.clean_amr_table)
+# ----------------------------------------------------------------------------
+metadata:
+  # How to treat the Intermediate / Non-susceptible / SDD phenotype family:
+  #   drop        -> binary R/S only (default, most common + defensible)
+  #   resistant   -> fold Intermediate into Resistant (CLSI-cautious)
+  #   susceptible -> fold Intermediate into Susceptible
+  # The chosen policy is stamped into download_manifest.json for provenance.
+  intermediate_policy: "drop"
 
 # ----------------------------------------------------------------------------
 # DATA PREPROCESSING PARAMETERS
@@ -72,17 +98,159 @@ paths:
 preprocessing:
   # K-mer counting configuration
   k_length: 21  # K-mer length
-  min_support: 5  # Minimum genomes a k-mer must appear in to be retained
-  # Rationale: Filters out rare k-mers (likely errors or strain-specific)
-  
-  # Computational resources
-  kmc_mem: 16  # Memory allocation for KMC (GB)
-  threads: 10  # Number of CPU threads to use
+  # Minimum-support (rare-k-mer) filter — DATA-ADAPTIVE so it scales with dataset
+  # size across antibiotics/organisms (a fixed count would drop almost everything
+  # on a small dataset and under-filter on a large one). 03 derives the effective
+  # value as:
+  #     min_support = max(min_support_floor, ceil(min_prevalence * n_genomes))
+  # Biology: a k-mer below ~1% prevalence cannot reach step-10's discriminativeness
+  # threshold (|Δprev| >= 0.10 needs ~10% prevalence), so the 1% floor drops only
+  # the rare / lineage-specific / sequencing-error tail and keeps every k-mer that
+  # could individually be a real marker. Large sets get aggressive de-confounding
+  # (faster training); small sets fall back to the absolute floor (keep markers).
+  min_support: null        # explicit override (int) — null = auto-derive (below)
+  min_support_floor: 5     # absolute noise floor (drop k-mers in < this many genomes)
+  min_prevalence: 0.01     # fraction of genomes; auto min_support scales with data size
+
+  # Computational resources — LAPTOP-SAFE DEFAULTS, overridden per machine via
+  # the environment (lib/config._ENV_RESOURCE_OVERRIDES), NOT by editing this file:
+  #     AMR_KMC_MEM=128 AMR_THREADS=20    # e.g. a TRUBA barbun node (-c40)
+  # These are machine size, not science, so they must not be a hand-edit that
+  # `git reset --hard` silently reverts on the next deploy.
+  kmc_mem: 16  # GB handed to KMC          (env: AMR_KMC_MEM)
+  threads: 10  # CPU threads               (env: AMR_THREADS)
   chunk_size: 200  # Genomes per matrix chunk (for RAM management)
   
-  # Feature engineering
-  encoding: "binary"  # Binary (presence/absence) or frequency-basedß
-  # Binary is preferred for assembled genomes
+  # Feature engineering: unitig/k-mer features are ALWAYS binary presence/absence
+  # (03u writes a 0/1 matrix). An `encoding: binary` key here used to imply a
+  # frequency-based alternative existed; none does, and nothing read the key.
+
+  # Feature representation consumed DOWNSTREAM (03b/04/05/06/07/07b). This is the
+  # single switch for the unitig pivot (ROADMAP §0 M12):
+  #   "kmer"   -> resolve_path('matrix_dir') = …/{antibiotic}/matrix      (03, raw k-mers)
+  #   "unitig" -> resolve_path('matrix_dir') = …/{antibiotic}/<unitig.out_subdir> (03u)
+  # Flipping this makes the WHOLE HPO/train/eval chain run on unitigs with NO
+  # per-script change (resolve_path redirects the matrix dir). The raw-k-mer
+  # baseline under …/matrix is preserved either way (03u writes a separate dir).
+  feature_repr: "unitig"   # unitig (thesis method — default) | kmer (raw-k-mer baseline, opt-in)
+
+# ----------------------------------------------------------------------------
+# UNITIG REPRESENTATION (ROADMAP §0.1 M12 — replaces raw k-mers downstream)
+# ----------------------------------------------------------------------------
+# Consumed by 03u_unitig_matrix.py. unitig-caller (Bifrost backend) builds the
+# population compacted de Bruijn graph and emits a genome×unitig presence/absence
+# matrix in the SAME chunked .npz contract as 03 (features.txt / y_{ab}.csv /
+# genomes_{ab}.csv / X_{ab}_part_*.npz), so 03b/04/05/06/07/07b read it unchanged.
+# KMC (02/02b) is kept for QC/spectra only. Output is written to a SEPARATE
+# sibling dir (out_subdir) so the raw-k-mer 'matrix' baseline is never overwritten.
+unitig:
+  # Sibling of data/processed/{organism}/{antibiotic}/matrix. Keep distinct from
+  # "matrix" so the raw-k-mer baseline (for the thesis unitig-vs-k-mer table) stays.
+  out_subdir: "matrix_unitig"
+  # ABSOLUTE minimum genome count to keep a unitig (ROADMAP §0.7 risk-4: use an
+  # absolute floor, NOT a proportional one, so a rare-but-real plasmid unitig is
+  # not dropped). Zero-variance core (present in every genome) is always dropped.
+  # NOTE: this is tuned for the full ~4000-genome run; lower it (e.g. --min-support
+  # 1) for tiny datasets/smoke tests via the CLI flag.
+  min_support: 10
+  # Organism-level store (03u --build-db): run unitig-caller ONCE over all the
+  # organism's assemblies, then each antibiotic SUBSETS the store (no re-run).
+  # db_min_support is the store's absolute floor; keep it <= every antibiotic's
+  # min_support so nothing a per-antibiotic filter would keep is pre-dropped
+  # (2 = drop only singletons, always safe since they can never reach support>=2
+  # in any subset).
+  db_min_support: 2
+  # unitig-caller thread count. null -> fall back to preprocessing.threads.
+  threads: null
+
+# ----------------------------------------------------------------------------
+# LINEAGE-AWARE CV (ROADMAP §0.1 M2 — PopPUNK clusters + GroupKFold)
+# ----------------------------------------------------------------------------
+# 02c runs PopPUNK once per organism (antibiotic-independent) to label each genome
+# with a lineage cluster; lib/lineage.py then builds GroupKFold folds so an entire
+# lineage stays on one side of train/test (no lineage leakage — ROADMAP §0.1).
+lineage:
+  # dbscan gives proper strain-level resolution — MEASURED 2026-07-16 under the
+  # pinned container with the E3 sketch settings below (k15-35/2), on the
+  # re-downloaded genomes. Per-organism results are in the model/refine table
+  # further down; E. coli is 294 lineages, largest 860 (15.4%), 94 singletons.
+  # (An earlier note here quoted 397 lineages / 14.9% — that was PopPUNK's OWN
+  # defaults k13-29/4 during the container check, not the settings we ship.)
+  #
+  # bgmm was tested and helps nothing: it collapsed E. coli into one ~94%
+  # mega-cluster, and on A. baumannii it matched plain dbscan exactly (76.3%).
+  #
+  # The counts are graph-tool-dependent, which is not obvious and cost a day to
+  # learn. PopPUNK 2.7.8 pinned, but rebuilding the container re-solved its
+  # network backend graph-tool 2.98 -> 3.0, and the clustering moved: 324 -> 397
+  # lineages, 157 -> 234 singletons (ARI 0.990 vs the 2.98 labels). The BACKBONE
+  # was untouched — largest lineage identical at 817/14.9%, 4 of the top 5
+  # identical — the drift is pure tail fragmentation, so it changes no scientific
+  # claim (big lineages intact = the CV property we rely on; singletons never leak).
+  # DECISION: accept graph-tool 3.0 (pinned in environment.lock.yml) rather than
+  # hold 2.98 back, since every model is being re-populated on it anyway. The
+  # numbers above are 3.0's. Re-measure them after ANY container rebuild —
+  # scripts/compare_lineage.py exists for exactly that.
+  # ── model / refine: chosen by ONE rule, measured across the whole panel ─────
+  # 2026-07-16 — largest-lineage fraction (the CV-balance criterion), dbscan vs
+  # dbscan+refine, every organism, same container:
+  #     organism        no-refine  refine    chosen
+  #     E. coli           15.4 %   15.4 %    no-refine (tie)
+  #     K. pneumoniae     22.3 %   58.6 %    no-refine   <- refine HARMS it
+  #     S. aureus         20.6 %   20.6 %    no-refine (tie)
+  #     P. aeruginosa     12.4 %   19.3 %    no-refine
+  #     E. faecium        11.4 %    4.2 %    no-refine (refine over-splits:
+  #                                           872 lineages / 668 singletons)
+  #     A. baumannii      76.3 %   52.1 %    REFINE      <- the only override
+  # RULE: dbscan by default; refine only where the default leaves one lineage
+  # dominating (>40 %). Uniform rule, per-organism outcome — refine is NOT a
+  # universal improvement: it merged K. pneumoniae's high-risk clones into one
+  # 58.6 % cluster while splitting A. baumannii's GC2. A. baumannii's override
+  # lives in organisms.yaml; this global default serves the other five.
+  # bgmm was tested too (A. baumannii 76.3 %, i.e. no different from dbscan).
+  # The old note here said "refine on bgmm failed (NaN boundary)" — true, but that
+  # was specific to a degenerate bgmm fit; refine runs fine on dbscan everywhere.
+  model: "dbscan"        # PopPUNK --fit-model: dbscan | bgmm
+  refine: false          # global default; A. baumannii overrides via the registry
+  threads: null          # null -> preprocessing.threads
+
+  # ── Sketching (PopPUNK --create-db) — docs/literature/E3.md §3.1 ──────────
+  # PopPUNK 2.7.8's OWN defaults are min_k 13 / max_k 29 / k_step 4. E3 recommends
+  # 15-35 step 2 for ESKAPEE: short k-mers cause spurious matches, and the wider
+  # range costs RAM but resolves strains better. We adopt E3's range for EVERY
+  # organism — a panel where some species are clustered on defaults and others on
+  # E3 settings would make the cross-organism claim methodologically lame.
+  # CHANGING ANY OF THESE RE-CLUSTERS THE ORGANISM: the clustering recorded in
+  # data/processed/{org}/lineage/ was produced with a specific setting, and the
+  # lineage groups ARE the CV folds. Re-verify lineage_summary after any change.
+  min_k: 15
+  max_k: 35
+  k_step: 2
+  sketch_size: 10000     # per-organism override in organisms.yaml (S. aureus needs 10^5)
+
+  # ── Quality control (PopPUNK --qc-db, a SEPARATE mode) — E3 §3.4 ──────────
+  # Contamination/length outliers corrupt the distance estimates and can make
+  # PopPUNK infer a core distance of 0. MEASURED 2026-07-18: with qc:false the
+  # A. baumannii clustering COLLAPSED to a single 96.7% mega-cluster (31 lineages,
+  # useless for lineage-CV); qc:true keeps it at 39.5% / 122 lineages. So --qc-db
+  # is ESSENTIAL, not redundant with CheckM2 — it guards the distance sketches.
+  # CONSEQUENCE: --qc-db drops ~3% of genomes from the cluster labels (1171->1133),
+  # and the downstream model MUST drop the same genomes (07b's --drop-uncovered),
+  # otherwise a QC-failed genome that still has a phenotype has no lineage and 07b
+  # falls back to holdout. QC-failed == low quality, so dropping it from the model
+  # is correct, not a workaround.
+  qc: true
+  max_a_dist: 0.5        # drop pairs with accessory distance above this (E3 §3.4)
+  length_sigma: 5        # SD of the length distribution beyond which a genome is cut
+  prop_n: 0.1            # max proportion of ambiguous bases
+  length_range: null     # [min, max] bp, or null; per-organism (A. baumannii — E3 §5)
+  # ── consumed by the CV step (lib/lineage, 06/07b wiring) ──
+  n_splits: 5            # StratifiedGroupKFold folds (ROADMAP §0.1: 5-10)
+  # NOTE: PopPUNK clusters are used AS-IS — every cluster, singletons included, is
+  # its own CV group. There is deliberately no rare-cluster pooling key here: an
+  # earlier `min_cluster_size: 10` claimed pooling that no code ever performed.
+  # Pooling is also the weaker option (it would force unrelated singletons into one
+  # group and thus one fold); see lib/lineage.py.
 
 # ----------------------------------------------------------------------------
 # MACHINE LEARNING TRAINING PARAMETERS
@@ -94,9 +262,39 @@ training:
   validation_fraction: 0.2  # Fraction of training data for early stopping validation
   
   # Hyperparameter optimization
-  n_trials: 25  # Number of Optuna optimization trials
-  optuna_fraction: 0.2  # Fraction of training chunks loaded into RAM during Bayesian opt (25%)
-  optimization_metric: "auc"  # Metric to optimize (auc, accuracy, f1)
+  n_trials: 30  # Number of Optuna optimization trials (upper bound)
+  # Early-stopping for HPO: stop once this many COMPLETED trials pass without
+  # improving the best score (TPE usually converges early; e.g. the unitig run's
+  # best was found by trial ~20). 0/null = run all n_trials. Env override:
+  # AMR_OPTUNA_PATIENCE.
+  optuna_patience: 15
+  optuna_fraction: 0.2  # Fraction of training chunks loaded into RAM during Bayesian opt (20%)
+  # The HPO objective is AUC, set via xgboost_params.eval_metric below. An
+  # `optimization_metric: auc` key here advertised a choice of auc/accuracy/f1
+  # that no code implemented.
+  # Parallel HPO (04_optimization.py): run several trials CONCURRENTLY, each
+  # XGBoost using this many threads. Optuna n_jobs is derived as
+  # (allocated cores // optuna_threads_per_trial) so all cores stay busy on the
+  # small HPO subset (avoids low SLURM CPU-efficiency warnings on HPC). Lower =
+  # more concurrent trials (e.g. 1 -> one trial per core); higher = fewer, fatter
+  # trials. Allocated cores come from SLURM_CPUS_PER_TASK (else os.cpu_count()).
+  optuna_threads_per_trial: 2
+  # Final training (05_model_training.py): tree count is found by early stopping
+  # on a held-out slice of the FULL training set (the HPO-subset n_estimators is
+  # too small for full-data training -> underfitting). max_boost_rounds is the
+  # early-stopping ceiling; the model then retrains on all train rows with the
+  # discovered count.
+  max_boost_rounds: 5000
+  # Build the train DMatrix in external memory (pages spilled to scratch) so the
+  # full 50.8M-feature matrix fits a 384 GB node. NOTE: raising min_support does
+  # NOT shrink RAM (nnz is dominated by common k-mers, not the rare tail it
+  # removes). To train IN-CORE (external_memory: false, fast, no low-efficiency
+  # warning) the only lever is fewer GENOMES -> see max_train_chunks.
+  external_memory: true
+  # Optional: train on this many train chunks (stratified subset) instead of all,
+  # to shrink nnz enough for in-core training. null = use all chunks. e.g. 12 ≈
+  # 2400 genomes (~14B nnz) fits in-core on a 384 GB node; full 18 chunks OOMs.
+  max_train_chunks: null
 
 # ----------------------------------------------------------------------------
 # XGBOOST MODEL CONFIGURATION
@@ -105,7 +303,9 @@ xgboost_params:
   # Core parameters (fixed during training)
   objective: "binary:logistic"  # Binary classification
   eval_metric: "auc"  # Evaluation metric
-  booster: "gbtree"  # Tree-based booster
+  # NOTE: keys in this block are read individually via .get(), not splatted into
+  # XGBoost — so an unread key here is silently inert, not a passthrough. A
+  # `booster: gbtree` key was exactly that (gbtree is XGBoost's default anyway).
   tree_method: "hist"  # Histogram-based algorithm (faster)
   device: "cpu"  # Computation device (cpu or cuda for GPU)
   verbosity: 1  # 0=silent, 1=warning, 2=info, 3=debug
@@ -135,6 +335,23 @@ xgboost_params:
 # ----------------------------------------------------------------------------
 analysis:
   top_n_features: 50  # Number of top features to extract for biological analysis
+  stability_threshold: 0.6  # selection_frequency >= this -> "stable" k-mer (07b; ROADMAP H1)
+
+  # ── BLAST confidence tiers (step 09) ──────────────────────────────────────
+  # Every BLAST hit is graded so weak matches are never presented as findings.
+  # For a 21-mer the primary, DB-size-independent criteria are IDENTITY and
+  # COVERAGE (alignment length / k); E-value is only a loose secondary gate
+  # because it depends on database size (CARD ~MB vs NCBI nt ~TB) and is NOT
+  # comparable across the two databases. Thresholds live here (citeable in
+  # Methods; ROADMAP Risk-4 / §1.4). Tiers checked best-first: confirmed→candidate→weak.
+  #   confirmed : near-exact full-length match to a known ARG
+  #   candidate : strong but partial (kept + flagged, NOT dropped)
+  #   weak      : reported transparently but flagged; below report_max_evalue dropped
+  confidence_tiers:
+    confirmed: {min_identity: 95.0, min_coverage: 0.95, max_evalue: 1.0}
+    candidate: {min_identity: 90.0, min_coverage: 0.80, max_evalue: 10.0}
+    weak:      {min_identity: 80.0, min_coverage: 0.60, max_evalue: 50.0}
+  report_max_evalue: 50.0  # hits weaker than this are excluded from the report entirely
 
 # ----------------------------------------------------------------------------
 # BLAST ANNOTATION PARAMETERS (Step 08)
@@ -156,3 +373,30 @@ blast:
   evalue:       10                        # E-value threshold for reporting hits
   word_size:    11                        # Seed word size (11 is standard for short seqs)
   threads:      8                         # CPU threads for local BLAST only
+  # BLAST -task: null = auto from feature_repr (unitig -> 'blastn' for long queries,
+  # k-mer -> 'blastn-short' for <30 bp). Set explicitly to override.
+  task:         null
+
+  # ── CARD variant/SNP data (step 11 — k-mer-centric SNP allele check) ──────
+  # NOT shipped with the repo (the bundled card.fna is the homolog model only).
+  # Download the full CARD data bundle to get these:
+  #   mkdir -p data/external/card && cd data/external/card
+  #   wget https://card.mcmaster.ca/latest/data -O card-data.tar.bz2
+  #   tar xjf card-data.tar.bz2          # -> card.json + *_variant_model.fasta
+  card_variant_fasta: "data/external/card/nucleotide_fasta_protein_variant_model.fasta"
+  card_json:          "data/external/card/card.json"
+  # CARD ARO ontology index (M16): maps ARO accession -> gene family / drug class /
+  # resistance mechanism for the KB. null = auto (aro_index.tsv next to card.json).
+  aro_index:          null
+
+# ----------------------------------------------------------------------------
+# NCBI ENTREZ PARAMETERS (Step 09 — biological summary)
+# ----------------------------------------------------------------------------
+# 09_biological_summary.py queries NCBI Entrez efetch to resolve gene names.
+# NCBI's Terms of Use REQUIRE a valid contact e-mail; a placeholder address
+# (e.g. user@example.com) risks an IP ban. Set your real e-mail below.
+# An optional API key raises the rate limit from 3 to 10 requests/sec:
+#   https://ncbiinsights.ncbi.nlm.nih.gov/2017/11/02/new-api-keys-for-the-e-utilities/
+ncbi:
+  entrez_email: "eren0demirbas@gmail.com"    # NCBI Entrez identity (Step 09) — avoids throttling/bans
+  api_key:      ""     # OPTIONAL — NCBI API key for a higher rate limit

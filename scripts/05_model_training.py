@@ -4,8 +4,10 @@
 Final Model Training Module for AMR Prediction
 
 This script trains the final XGBoost model using pre-optimized hyperparameters
-for antibiotic resistance prediction. Implements incremental learning for
-large-scale genomic data processing with threshold optimization.
+for antibiotic resistance prediction. It uses standard full-data gradient
+boosting over a streaming (Ext)QuantileDMatrix (lib.xgb_data), with the tree
+count set by early stopping on a held-out slice of the training data, so the
+full multi-million-feature matrix is processed without materialising it in RAM.
 
 Configuration Architecture:
     This script uses a two-stage configuration loading system:
@@ -39,9 +41,16 @@ from sklearn.metrics import (
 )
 import sys
 import gc
-import random
 import datetime
 import shutil
+
+# Shared label-slicing helper (single source of truth) — see scripts/utils.py
+from utils import get_y_chunk
+# Streaming QuantileDMatrix construction (full-data boosting; bounded memory).
+from lib.xgb_data import build_quantile_dmatrix, global_pos_weight
+# MLOps model registry (SCALE_MLOPS_PLAN.md §7.2) — additive, best-effort.
+from lib import run_metadata as rm
+from lib.config import resolve_path, env_bool, get_target
 
 
 # ============================================================================
@@ -62,7 +71,7 @@ with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
     config = yaml.safe_load(f)
 
 # Extract configuration values
-TARGET_ANTIBIOTIC = config['project']['target_antibiotic']
+TARGET_ANTIBIOTIC = get_target(config=config)[1]
 CHUNK_SIZE = config['preprocessing']['chunk_size']
 RANDOM_SEED = config['training'].get('random_seed', 42)
 
@@ -76,13 +85,10 @@ BASE_PARAMS = {
     'verbosity': config['xgboost_params']['verbosity']
 }
 
-# Cross-platform paths - loaded from global config
-# Antibiotic-specific paths will be constructed using target_antibiotic
-MATRIX_DIR = PROJECT_ROOT / config['paths']['matrix_dir'].format(antibiotic=TARGET_ANTIBIOTIC)
-MODELS_DIR = PROJECT_ROOT / config['paths']['models_dir'].format(antibiotic=TARGET_ANTIBIOTIC)
-
-# Create output directory
-MODELS_DIR.mkdir(parents=True, exist_ok=True)
+# Organism-aware paths (SCALE_MLOPS_PLAN §4.2)
+ORGANISM = get_target(config=config)[0]
+MATRIX_DIR = resolve_path('matrix_dir', organism=ORGANISM, antibiotic=TARGET_ANTIBIOTIC, config=config)
+MODELS_DIR = resolve_path('models_dir', organism=ORGANISM, antibiotic=TARGET_ANTIBIOTIC, config=config)
 
 # Create output directory
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
@@ -121,7 +127,8 @@ def load_optimized_hyperparameters():
         yaml.YAMLError: If the YAML file is malformed
     """
     # Define antibiotic-specific config path
-    antibiotic_config_path = CONFIG_DIR / f"config_{TARGET_ANTIBIOTIC}.yaml"
+    antibiotic_config_path = resolve_path('experiment_config', organism=ORGANISM,
+                                          antibiotic=TARGET_ANTIBIOTIC, config=config)
     
     if not antibiotic_config_path.exists():
         raise FileNotFoundError(
@@ -204,109 +211,138 @@ def load_optimized_hyperparameters():
         sys.exit(1)
 
 
-def get_y_chunk(y_all, chunk_id, chunk_size, total_len):
-    """
-    Extract label subset for a specific chunk.
-    
-    Args:
-        y_all: Complete label array
-        chunk_id: Chunk identifier
-        chunk_size: Samples per chunk
-        total_len: Total number of samples
-    
-    Returns:
-        Label subset for the chunk
-    """
-    start = chunk_id * chunk_size
-    end = min((chunk_id + 1) * chunk_size, total_len)
-    return y_all[start:end]
-
+# get_y_chunk() is imported from utils.py (shared with 04 and 06).
 
 
 # ============================================================================
 # TRAINING FUNCTIONS
 # ============================================================================
-def final_training_incremental(best_params, train_files, y_all):
+def _es_val_split(train_files, frac):
+    """Hold out ~frac of the train chunks as an early-stopping validation set.
+
+    The held-out chunks are spread across the (resistance-ratio-sorted) train
+    list via linspace so the ES validation spans the difficulty spectrum.
+    ``frac`` comes from config (training.validation_fraction) — not hardcoded.
     """
-    Train XGBoost model using an Epoch-based shuffled incremental strategy.
-    
-    Trains exactly 1 tree per chunk per epoch across multiple epochs, with
-    chunk order shuffled each epoch to prevent catastrophic forgetting and
-    eliminate the resistance-ratio sorting bias from the stratified split.
-    
-    Args:
-        best_params: XGBoost hyperparameters dictionary
-        train_files: List of paths to matrix chunk files
-        y_all: Complete label array
-    
+    n = len(train_files)
+    n_val = max(1, int(round(n * frac)))
+    if n_val >= n:                       # too few chunks to split → reuse all
+        return train_files, train_files
+    val_idx = set(np.linspace(0, n - 1, n_val, dtype=int).tolist())
+    val = [f for i, f in enumerate(train_files) if i in val_idx]
+    fit = [f for i, f in enumerate(train_files) if i not in val_idx]
+    return fit, val
+
+
+def _build_dmatrix(files, y_all, max_bin, pos_weight, cache_dir, name, use_extmem, ref=None):
+    """Build one (Ext)QuantileDMatrix, spilling to cache_dir/name when external.
+
+    Pass ``ref`` = the training DMatrix when building an evaluation matrix
+    (XGBoost requires eval QuantileDMatrices to reuse the training quantiles).
+    """
+    cache_prefix = None
+    if use_extmem:
+        sub = cache_dir / name
+        shutil.rmtree(sub, ignore_errors=True)
+        sub.mkdir(parents=True, exist_ok=True)
+        cache_prefix = str(sub / "cache")
+    return build_quantile_dmatrix(files, y_all, CHUNK_SIZE, max_bin=max_bin,
+                                  pos_weight=pos_weight, cache_prefix=cache_prefix, ref=ref)
+
+
+def final_training(best_params, train_files, y_all):
+    """
+    Train the final model with full-data boosting + early stopping.
+
+    The tree count is chosen by early stopping on a held-out slice of the FULL
+    training set, rather than reusing the Optuna config's n_estimators (which was
+    found on the small HPO subset). This makes the tree count adapt to the real
+    training-set size per antibiotic/organism instead of assuming the subset
+    count transfers. The other tuned hyperparameters (learning rate, depth, …)
+    come from 04. After the count is found, the model is retrained on the WHOLE
+    training set with that many trees so the final model sees all training data.
+
+    The matrix is streamed via lib.xgb_data — in-core QuantileDMatrix when it
+    fits RAM (`training.external_memory: false`, fast), otherwise an
+    ExtMemQuantileDMatrix spilling to scratch (default; safe for the full
+    50.8M-feature matrix that OOMs a 384 GB node in-core). Class imbalance is
+    corrected once via a global neg/pos instance weight.
+
     Returns:
         tuple: (Trained XGBoost Booster model, optimal_threshold)
     """
     print("\n" + "=" * 80)
-    print("EPOCH-BASED INCREMENTAL MODEL TRAINING (SHUFFLED)")
+    print("FULL-DATA GRADIENT BOOSTING + EARLY STOPPING")
     print("=" * 80)
-    
-    total_trees = best_params.pop('n_estimators', 100)
-    
-    # To distribute learning globally, we train 1 tree per chunk across multiple epochs
-    epochs = max(1, int(np.ceil(total_trees / len(train_files))))
-    actual_total_trees = epochs * len(train_files)
-    
-    print(f"Target trees (Optuna): {total_trees} | Epochs required: {epochs}")
-    print(f"Strategy: 1 tree/chunk/epoch -> Total final trees: {actual_total_trees}")
-    print("=" * 80)
-    
+
+    best_params.pop('n_estimators', None)   # tree count is re-derived by ES below
     params = best_params.copy()
+    params.pop('scale_pos_weight', None)    # global instance weight handles imbalance
+    params.setdefault('base_score', 0.5)
+    max_bin = int(params.get('max_bin', 2))
+
+    es_rounds = int(config['xgboost_params'].get('early_stopping_rounds', 50))
+    max_rounds = int(config['training'].get('max_boost_rounds', 5000))
+    use_extmem = env_bool('AMR_EXTERNAL_MEMORY', config['training'].get('external_memory', True))
+    max_train_chunks = config['training'].get('max_train_chunks', None)
+    print(f"early_stopping_rounds={es_rounds} | max_boost_rounds={max_rounds} | "
+          f"external_memory={use_extmem}")
+
+    # Optional: train on a stratified subset of the train chunks. nnz (and thus
+    # RAM) is driven by common k-mers, so raising min_support barely shrinks it —
+    # the only way to fit the matrix IN-CORE (fast, no low-efficiency warning) is
+    # to use fewer GENOMES. Chunks are picked by linspace over the
+    # resistance-ratio-sorted train list (04's order) so the subset spans the
+    # difficulty spectrum. None = use all train chunks.
+    if max_train_chunks and len(train_files) > int(max_train_chunks):
+        k = int(max_train_chunks)
+        idx = np.linspace(0, len(train_files) - 1, k, dtype=int)
+        train_files = [train_files[i] for i in sorted(set(idx.tolist()))]
+        print(f"  Sub-sampling train chunks → {len(train_files)} chunks "
+              f"(training.max_train_chunks={k}) for in-core training.")
+
+    es_val_frac = float(config['training'].get('validation_fraction', 0.2))
+    fit_files, val_files = _es_val_split(train_files, es_val_frac)
+    cache_dir = MODELS_DIR / "_xgb_cache"
+    shutil.rmtree(cache_dir, ignore_errors=True)
     model = None
-    
-    for epoch in range(epochs):
-        print(f"\n--- EPOCH {epoch+1}/{epochs} ---")
-        
-        # CRITICAL FIX: Shuffle chunks to destroy the Resistance-Ratio sorting bias
-        shuffled_files = train_files.copy()
-        random.seed(RANDOM_SEED + epoch)
-        random.shuffle(shuffled_files)
-        
-        for i, chunk_file in enumerate(shuffled_files):
-            try:
-                X_chunk = load_npz(chunk_file)
-                chunk_num = int(chunk_file.stem.split('_')[-1])
-                y_chunk = get_y_chunk(y_all, chunk_num, CHUNK_SIZE, len(y_all))
-                
-                # Pop scale_pos_weight to avoid double-dipping with dynamic weights
-                params.pop('scale_pos_weight', None)
+    dfit = dval = dall = None
+    try:
+        # ---- Phase 1: find the right tree count by early stopping --------------
+        pw_fit = global_pos_weight(fit_files, y_all, CHUNK_SIZE)
+        dfit = _build_dmatrix(fit_files, y_all, max_bin, pw_fit, cache_dir, "fit", use_extmem)
+        dval = _build_dmatrix(val_files, y_all, max_bin, None, cache_dir, "val", use_extmem, ref=dfit)
+        print(f"  ES split: fit {dfit.num_row():,} rows / val {dval.num_row():,} rows "
+              f"× {dfit.num_col():,} features")
+        es_model = xgb.train(params, dfit, num_boost_round=max_rounds,
+                             evals=[(dval, "val")], early_stopping_rounds=es_rounds,
+                             verbose_eval=False)
+        best_n = max(1, int(es_model.best_iteration) + 1)
+        print(f"  ✓ Early stopping: best tree count = {best_n} "
+              f"(val {params.get('eval_metric', 'auc')} = {es_model.best_score:.4f})")
+        dfit = dval = es_model = None
+        gc.collect()
 
-                # Dynamic Instance Weighting (Solves Local Chunk Imbalance)
-                pos_count = np.sum(y_chunk)
-                neg_count = len(y_chunk) - pos_count
+        # ---- Phase 2: retrain on ALL training rows with that tree count --------
+        pw_all = global_pos_weight(train_files, y_all, CHUNK_SIZE)
+        dall = _build_dmatrix(train_files, y_all, max_bin, pw_all, cache_dir, "all", use_extmem)
+        print(f"  Retraining on full train set: {dall.num_row():,} rows × "
+              f"{dall.num_col():,} features | global pos weight {pw_all:.3f}")
+        model = xgb.train(params, dall, num_boost_round=best_n)
+        print(f"  ✓ Trained {model.num_boosted_rounds()} trees over the full training set.")
+    finally:
+        dfit = dval = dall = None      # release DMatrices so cache files unlock
+        gc.collect()
+        shutil.rmtree(cache_dir, ignore_errors=True)
 
-                if pos_count > 0 and neg_count > 0:
-                    weight_ratio = neg_count / pos_count
-                    weights = np.where(y_chunk == 1, weight_ratio, 1.0)
-                else:
-                    weights = np.ones(len(y_chunk))  # Fallback if perfectly pure chunk
-
-                n_jobs = params.get('nthread', params.get('n_jobs', -1))
-                dtrain = xgb.DMatrix(X_chunk, label=y_chunk, weight=weights, nthread=n_jobs)
-
-                # Train exactly 1 tree per chunk to distribute learning evenly
-                model = xgb.train(params, dtrain, num_boost_round=1, xgb_model=model)
-
-                del X_chunk, y_chunk, dtrain, weights
-                gc.collect()
-            except Exception as e:
-                print(f"  ✗ ERROR in Chunk {chunk_file.name}: {e}")
-                sys.exit(1)
-        
-        print(f"  ✓ Epoch {epoch+1} Complete. Current Trees in Model: {model.num_boosted_rounds()}")
-    
-    # Dynamic Instance Weighting is active: threshold remains 0.5 (no double-dipping)
-    print("\n[Threshold Configuration]")
-    print("  Dynamic Instance Weighting active. Per-chunk neg/pos weight ratio applied to DMatrix.")
-    print("  scale_pos_weight removed from params (prevents double-dipping with dynamic weights).")
+    # Global class weighting is active → the operating threshold stays the neutral
+    # 0.5. It is NOT tuned on the test set (P-01 leakage fix); 06 only reports
+    # Youden's J and never overwrites this value.
     optimal_threshold = 0.5
-    print(f"  Optimal Threshold fixed to: {optimal_threshold:.4f} (calibrated via Dynamic Instance Weighting)")
-    
+    print("\n[Threshold Configuration]")
+    print(f"  Operating threshold fixed at {optimal_threshold:.4f} "
+          f"(global class weighting; no test-set tuning).")
+
     return model, optimal_threshold
 
 
@@ -362,7 +398,7 @@ def final_test(model, test_files, y_all, optimal_threshold):
     y_prob_all = np.array(y_prob_all)
     
     # Threshold application without peeking at test results (No Data Leakage)
-    print(f"\nApplying Unbiased Treshold: {optimal_threshold:.4f} (from Training Distribution)")
+    print(f"\nApplying Unbiased Threshold: {optimal_threshold:.4f} (from Training Distribution)")
     
     y_pred_all = (y_prob_all >= optimal_threshold).astype(int)
     
@@ -390,6 +426,14 @@ def final_test(model, test_files, y_all, optimal_threshold):
     print(cm)
     print("\n" + "=" * 80)
 
+    return {
+        'accuracy': float(acc),
+        'roc_auc': float(auc),
+        'mcc': float(final_mcc),
+        'threshold': float(optimal_threshold),
+        'n_test_samples': int(len(y_true_all)),
+    }
+
 
 # ============================================================================
 # MAIN PIPELINE
@@ -402,7 +446,7 @@ def main():
         1. Load optimized hyperparameters and data split from antibiotic-specific config
         2. Load labels and resolve chunk file paths
         3. Use stratified train/test split from optimization (NO randomization)
-        4. Train model incrementally on exact training chunks
+        4. Train model with full-data boosting + early stopping on the training chunks
         5. Evaluate on exact test chunks (same as optimization)
         6. Save trained model
     """
@@ -446,7 +490,8 @@ def main():
     
     # Load antibiotic-specific config to show optuna subset info
     try:
-        antibiotic_config_path = CONFIG_DIR / f"config_{TARGET_ANTIBIOTIC}.yaml"
+        antibiotic_config_path = resolve_path('experiment_config', organism=ORGANISM,
+                                              antibiotic=TARGET_ANTIBIOTIC, config=config)
         with open(antibiotic_config_path, 'r') as f:
             antibiotic_config = yaml.safe_load(f)
         optuna_count = antibiotic_config.get('data_split', {}).get('optuna_count', 'N/A')
@@ -487,11 +532,11 @@ def main():
     
     # Train model and calculate unbiased threshold from training prevalence
     print("\n[4/5] Training model...")
-    final_model, optimal_threshold = final_training_incremental(best_params.copy(), train_files, y_all)
+    final_model, optimal_threshold = final_training(best_params.copy(), train_files, y_all)
     
     # Evaluate without test set leakage
     print("\n[5/5] Evaluating model...")
-    final_test(final_model, test_files, y_all, optimal_threshold)
+    train_metrics = final_test(final_model, test_files, y_all, optimal_threshold)
     
     # Save model
     model_path = MODELS_DIR / f"xgboost_{TARGET_ANTIBIOTIC}_final_v2.json"
@@ -506,21 +551,69 @@ def main():
         shutil.copy2(model_path, backup_model_path)
         print(f"✓ Timestamped Backup Model saved successfully: {backup_model_path.name} in {MODELS_DIR}")
         
-        # Save threshold to the antibiotic-specific config
+        # Save threshold to the antibiotic-specific config.
+        # This script is the SINGLE writer of the operating threshold:
+        # 06_evaluation.py now only REPORTS Youden's J and never overwrites the
+        # config (removing the previous test-set data leakage + write conflict).
         antibiotic_config['evaluation'] = {
             'optimal_threshold': float(round(float(optimal_threshold), 4)),
-            'threshold_type': 'Dynamic_Instance_Weighting (0.5 — per-chunk neg/pos ratio applied to DMatrix)'
+            'threshold_type': 'global_neg_pos_weight (0.5 — single global neg/pos instance weight; no test-set tuning)'
         }
-        
+
+        # Preserve the auto-generated comment header (leading '#' lines written
+        # by 04_optimization.py) so repeated runs stay idempotent and do not
+        # silently strip the provenance banner.
+        header_lines = []
+        try:
+            with open(antibiotic_config_path, 'r', encoding='utf-8') as hf:
+                for line in hf:
+                    if line.startswith('#') or line.strip() == '':
+                        header_lines.append(line)
+                    else:
+                        break
+        except Exception:
+            header_lines = []
+
         with open(antibiotic_config_path, 'w', encoding='utf-8') as f:
+            if header_lines:
+                f.writelines(header_lines)
             yaml.dump(antibiotic_config, f, default_flow_style=False, sort_keys=False)
-            
+
         print(f"✓ Unbiased Threshold saved to config: {antibiotic_config_path.name}")
-        
+
     except Exception as e:
         print(f"ERROR: Failed to save model or config: {e}")
         sys.exit(1)
-    
+
+    # ------------------------------------------------------------------------
+    # MLOps: write models/{organism}/{antibiotic}/manifest.json (model card).
+    # "Best model" selection can use these metrics instead of guessing from
+    # timestamps / fragile _final_v2 naming (SCALE_MLOPS_PLAN.md §7.2).
+    # Best-effort — never break a successful training run.
+    # ------------------------------------------------------------------------
+    try:
+        organism = get_target(config=config)[0]
+        run_id = rm.make_run_id(organism, TARGET_ANTIBIOTIC)
+        manifest = {
+            "run_id": run_id,
+            "organism": organism,
+            "antibiotic": TARGET_ANTIBIOTIC,
+            "model_file": model_path.name,
+            "metrics": train_metrics,
+            "params": best_params,
+            "n_trees": int(final_model.num_boosted_rounds()),  # actual count from early stopping
+            "threshold": float(optimal_threshold),
+            "threshold_type": "global_neg_pos_weight (operating threshold 0.5, no test tuning)",
+            "data_split_hash": rm.hash_files([str(f) for f in train_files]),
+            "git_commit": rm.git_commit_hash(),
+            "git_dirty": rm.git_is_dirty(),
+            "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+        if rm.write_json(MODELS_DIR / "manifest.json", manifest):
+            print(f"✓ Model manifest written: {(MODELS_DIR / 'manifest.json')}")
+    except Exception as e:
+        print(f"⚠ Could not write model manifest: {e}")
+
     print("\n" + "=" * 80)
     print("TRAINING COMPLETE")
     print("=" * 80)
@@ -530,5 +623,14 @@ def main():
 # SCRIPT ENTRY POINT
 # ============================================================================
 if __name__ == "__main__":
-    main()
+    # Global guard: report any unhandled exception with a traceback and exit
+    # non-zero so a crash mid-training cannot leave a half-written model that a
+    # downstream step silently consumes.
+    import traceback
+    try:
+        main()
+    except Exception as e:
+        print(f"\nFATAL ERROR: {e}")
+        traceback.print_exc()
+        sys.exit(1)
 

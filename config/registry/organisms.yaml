@@ -1,0 +1,223 @@
+# ============================================================================
+# ORGANISM REGISTRY — single source of truth for multi-organism scale-out
+# ============================================================================
+# Adding a new organism = add a block here + drop its data in the matching
+# data/raw/{organism}/ and data/external/{organism}/ folders. No Python code
+# changes are required (see docs/SCALE_MLOPS_PLAN.md §9). Accessed via
+# scripts/lib/registry.py.
+#
+# SCHEMA 2.0 (2026-07-13): ESKAPEE-oriented (docs/literature/ESKAPEE1.md).
+# Each block now carries the biology that used to live only in the KB schema
+# (gram_stain, phylum) + ESKAPEE prioritisation, so the registry is the single
+# source of truth and populate_database reads these instead of hard-coding them.
+#   status:          done | in_progress | planned | excluded_insufficient_data
+#                    (replaces the old `enabled`; closed vocabulary — validate_registry
+#                    rejects anything else, since an unknown value would silently
+#                    make the organism inactive. See lib/registry.VALID_STATUS.)
+#   eskapee_phase:   1 (thesis + 1st paper: Kp, Ec, Sa, Ab) | 2 (2nd paper: Pa, Efm, Enterobacter)
+#   priority_classes: the antibiotic classes this organism is the strongest showcase for
+# Slugs are lowercase snake_case (must match kb_figures._abbr and path templates).
+# `antibiotics:` for a not-yet-run (planned) organism is PROVISIONAL — curated
+# to its priority classes, refined when its pipeline actually runs.
+# ============================================================================
+schema_version: "2.0"
+
+organisms:
+  # ── Phase 1 (thesis + 1st SCI paper) ──────────────────────────────────────
+  ecoli:
+    display_name: "Escherichia coli"
+    taxid: 562
+    gram_stain: negative
+    phylum: Pseudomonadota
+    eskapee_phase: 1
+    status: done
+    priority_classes: [cephalosporins, quinolones]
+    metadata_file: "data/external/ecoli/metadata/amr_phenotypes.csv"
+    genome_id_column: "Genome ID"
+    genomes_dir: "data/raw/ecoli/genomes"
+    source: "BV-BRC"
+    download_date: "2026-06-01"
+    filter_criteria: "BV-BRC genome_amr: taxon_id=562; public=true; evidence=\"Laboratory Method\" (00a). Quality is NOT filtered at download — 02d/M15 (CheckM2+QUAST) grades genomes afterwards and 03u drops the outliers."
+    # CURATED 2026-07-16 from the downloaded genomes (minority >=150). The panel
+    # is trimmed to showcase CLASSES, not every drug: the raw >=150 list had 6
+    # cephalosporins here — kept cefotaxime (CTX-M/ESBL flagship) only. chloramphenicol
+    # (minority exactly 150) is kept solely to cover the phenicols class (E. coli is
+    # its only organism). Cross-organism drugs kept for concordance.
+    antibiotics: [ampicillin, amoxicillin_clavulanic_acid, cefotaxime, ciprofloxacin, gentamicin, trimethoprim_sulfamethoxazole, tetracycline, chloramphenicol]
+
+  kpneumoniae:
+    display_name: "Klebsiella pneumoniae"
+    taxid: 573
+    gram_stain: negative
+    phylum: Pseudomonadota
+    eskapee_phase: 1
+    status: done
+    priority_classes: [carbapenems]
+    metadata_file: "data/external/kpneumoniae/metadata/amr_phenotypes.csv"
+    genome_id_column: "Genome ID"
+    genomes_dir: "data/raw/kpneumoniae/genomes"
+    source: "BV-BRC"
+    download_date: "2026-07-03"
+    filter_criteria: "BV-BRC genome_amr: taxon_id=573; public=true; evidence=\"Laboratory Method\" (00a). Quality is NOT filtered at download — 02d/M15 (CheckM2+QUAST) grades genomes afterwards and 03u drops the outliers."
+    # CURATED 2026-07-16 (minority >=150). K. pneu is the carbapenem flagship, so
+    # meropenem+imipenem are BOTH kept (KPC story). Carries 3 single-organism
+    # classes — colistin (polymyxins/mcr), tigecycline (glycylcyclines), aztreonam
+    # (monobactams) — so those stay. Trimmed 6 cephalosporins -> cefoxitin (AmpC)
+    # + ceftazidime (ESBL); dropped the redundant aminoglycosides/quinolones.
+    antibiotics: [gentamicin, meropenem, imipenem, cefoxitin, ceftazidime, ciprofloxacin, trimethoprim_sulfamethoxazole, tetracycline, tigecycline, aztreonam, colistin]
+
+  staphylococcus_aureus:
+    display_name: "Staphylococcus aureus"
+    taxid: 1280
+    gram_stain: positive
+    phylum: Bacillota
+    eskapee_phase: 1
+    status: in_progress   # 2639 genomes downloaded (2026-07-16 re-fetch); no models in the KB yet
+    priority_classes: [penicillins]   # methicillin/oxacillin (mecA/MRSA) surrogate: cefoxitin
+    metadata_file: "data/external/staphylococcus_aureus/metadata/amr_phenotypes.csv"
+    genome_id_column: "Genome ID"
+    genomes_dir: "data/raw/staphylococcus_aureus/genomes"
+    source: "BV-BRC"
+    download_date: "2026-07-07"   # 2494 usable .fna (162 failed: the low-ID 1280.9xx cluster)
+    filter_criteria: "BV-BRC genome_amr: taxon_id=1280; public=true; evidence=\"Laboratory Method\" (00a). Quality is NOT filtered at download — 02d/M15 (CheckM2+QUAST) grades genomes afterwards and 03u drops the outliers."
+    # CURATED 2026-07-16 (minority >=150). No trimming needed — every drug is a
+    # distinct class. cefoxitin+oxacillin are the MRSA/mecA flagship; erythromycin
+    # is the panel's only macrolide.
+    antibiotics: [cefoxitin, oxacillin, ciprofloxacin, erythromycin, clindamycin, gentamicin, tetracycline, trimethoprim_sulfamethoxazole]
+    # PopPUNK override (docs/literature/E3.md §4): S. aureus is the panel's most
+    # clonal species — core distances between strains are so small that the default
+    # 10^4 sketch cannot separate them, collapsing lineages and gutting the CV
+    # grouping. 10^5 costs runtime and buys single-nucleotide-level resolution.
+    lineage:
+      sketch_size: 100000
+
+  acinetobacter_baumannii:
+    display_name: "Acinetobacter baumannii"
+    taxid: 470
+    gram_stain: negative
+    phylum: Pseudomonadota
+    eskapee_phase: 1
+    status: in_progress   # genomes downloaded 2026-07-16
+    priority_classes: [carbapenems, polymyxins]   # OXA-23/24/58 + colistin (mcr/pmrAB)
+    metadata_file: "data/external/acinetobacter_baumannii/metadata/amr_phenotypes.csv"
+    genome_id_column: "Genome ID"
+    genomes_dir: "data/raw/acinetobacter_baumannii/genomes"
+    source: "BV-BRC"
+    download_date: "2026-07-16"   # 1171 usable .fna
+    filter_criteria: "BV-BRC genome_amr: taxon_id=470; public=true; evidence!=\"Computational Method\" (00a). Quality graded afterwards by 02d/M15."
+    # CURATED 2026-07-16 (minority >=150, downloaded genomes). ampicillin_sulbactam
+    # (minority 405) is a key sulbactam-based A. baumannii therapy — its registry
+    # entry was slash-canonical (path-breaking) and is now fixed to the underscore
+    # form. carbapenem flagship keeps meropenem+imipenem (OXA-23/24/58). NOTE:
+    # colistin (polymyxins priority_class) did NOT clear minority>=150 here, so the
+    # polymyxin showcase is carried by K. pneumoniae instead.
+    antibiotics: [imipenem, meropenem, amikacin, ampicillin_sulbactam, ceftazidime, ciprofloxacin, tetracycline, trimethoprim_sulfamethoxazole]
+    # PopPUNK (docs/literature/E3.md §5): A. baumannii needs no special model or
+    # sketch tuning — defaults resolve GC1/GC2 well — EXCEPT a length filter
+    # narrowed to its genome size (~3.9 Mb), because its extreme plasmid/integron
+    # plasticity makes contamination easy to mistake for accessory content.
+    # PopPUNK override — MEASURED 2026-07-16, the ONLY organism that needs one.
+    # A. baumannii clinical AMR collections are dominated by the GC2 high-risk
+    # clone, and plain dbscan puts 76.3 % of the genomes in a single lineage —
+    # useless for GroupKFold (one fold would hold 76 % of the data). Boundary
+    # refinement splits it: 76.3 % -> 52.1 % largest lineage (60 -> 84 lineages).
+    #
+    # Sketch size does NOT help here (tested: 10^4 -> 10^5 moved it 76.3 -> 76.4 %),
+    # unlike S. aureus — the GC2 clone is genuinely tight, not under-resolved. bgmm
+    # was also tested and made no difference (76.3 %).
+    #
+    # 52 % is still the panel's worst balance and reflects real biology, not a bad
+    # setting; A. baumannii's lineage-CV is correspondingly the most conservative.
+    # Say so in the Methods rather than hiding it.
+    lineage:
+      refine: true
+    # length_range NOT SET, but now derivable: genomes ARE downloaded (2026-07-16),
+    # so the observed assembly-length distribution can be measured (E3 §5 wants it
+    # narrowed to ~3.9 Mb). Left empty until measured rather than guessed; the
+    # global `length_sigma: 5` filters length outliers adaptively meanwhile, so
+    # this is a refinement, not a blocker.
+
+  # ── Phase 2 (2nd SCI paper / advanced optimisation) ───────────────────────
+  pseudomonas_aeruginosa:
+    display_name: "Pseudomonas aeruginosa"
+    taxid: 287
+    gram_stain: negative
+    phylum: Pseudomonadota
+    eskapee_phase: 2
+    status: in_progress   # genomes downloaded 2026-07-16
+    priority_classes: [carbapenems]   # OprD loss + MexAB-OprM efflux + VIM (polygenic — hard)
+    metadata_file: "data/external/pseudomonas_aeruginosa/metadata/amr_phenotypes.csv"
+    genome_id_column: "Genome ID"
+    genomes_dir: "data/raw/pseudomonas_aeruginosa/genomes"
+    source: "BV-BRC"
+    download_date: "2026-07-16"   # 1382 usable .fna
+    filter_criteria: "BV-BRC genome_amr: taxon_id=287; public=true; evidence!=\"Computational Method\" (00a). Quality graded afterwards by 02d/M15."
+    # CURATED 2026-07-16 (minority >=150, downloaded genomes). P. aeruginosa is the
+    # hardest (polygenic: OprD loss + MexAB-OprM efflux + VIM), and only 4 drugs
+    # clear the threshold — meropenem (carbapenem), ceftazidime (cephalosporin),
+    # ciprofloxacin (quinolone), amikacin (aminoglycoside). No trimming needed.
+    antibiotics: [meropenem, ceftazidime, ciprofloxacin, amikacin]
+
+  enterococcus_faecium:
+    display_name: "Enterococcus faecium"
+    taxid: 1352
+    gram_stain: positive
+    phylum: Bacillota
+    eskapee_phase: 2
+    status: in_progress   # genomes downloaded 2026-07-16
+    priority_classes: [glycopeptides]   # vanA/vanB operons (VRE)
+    metadata_file: "data/external/enterococcus_faecium/metadata/amr_phenotypes.csv"
+    genome_id_column: "Genome ID"
+    genomes_dir: "data/raw/enterococcus_faecium/genomes"
+    source: "BV-BRC"
+    download_date: "2026-07-16"   # 2078 usable .fna
+    filter_criteria: "BV-BRC genome_amr: taxon_id=1352; public=true; evidence!=\"Computational Method\" (00a). Quality graded afterwards by 02d/M15."
+    # CURATED 2026-07-16 (minority >=150, downloaded genomes). vancomycin+teicoplanin
+    # are BOTH kept — the VRE flagship, and mechanistically distinct (vanA hits both,
+    # vanB only vancomycin). ampicillin matters (E. faecium intrinsic resistance).
+    # linezolid dropped: minority 67, far below threshold (oxazolidinone resistance
+    # is rare in this set). gentamicin = high-level aminoglycoside resistance.
+    antibiotics: [vancomycin, teicoplanin, gentamicin, ampicillin, clindamycin, tetracycline]
+
+  # ⛔ EXCLUDED FROM THE PANEL — insufficient laboratory-confirmed AST in BV-BRC.
+  # Reported in the thesis as a NEGATIVE FINDING, not silently dropped.
+  #
+  # MEASURED 2026-07-15 (lab-verified rows only, evidence="Laboratory Method"):
+  #   taxid 550 alone ............ 320 genomes, best minority  44 (tobramycin)
+  #   FULL ECC, 6 species ........ 466 genomes, best minority  89 (gentamicin)
+  #     550 E. cloacae 11935 rows | 61645 E. asburiae 2081 | 158836 E. hormaechei 1283
+  #     1812935 E. roggenkampii 799 | 299767 E. ludwigii 441 | 881260 E. bugandensis 294
+  #   antibiotics with minority >=150: 0.  With >=100: 0.
+  #
+  # The complex WAS checked before concluding. docs/literature/E4.md argues the
+  # scarcity is a taxonomy artefact — clinical "E. cloacae" is 80-92 % actually
+  # E. hormaechei, so querying taxid 550 supposedly hides ~90 % of the data. The
+  # biology is right but it does NOT hold in BV-BRC: 550 is the LARGE bucket
+  # (11935 rows) and hormaechei the small one (1283), because the database keeps
+  # the submitter's label regardless of what ANI would say. Expanding to all six
+  # species moved the best minority 44 -> 89, still far under the >=150 needed.
+  # E4's counter-example (1054 ECC genomes, AUC 0.88-0.91) drew on BV-BRC *plus
+  # NCBI NDARO plus a local hospital cohort* — the gain came from extra SOURCES,
+  # not from taxonomy.
+  #
+  # Reviving it means a second source (CABBAGE / NCBI NDARO) and therefore a
+  # BioSample-keyed dedup pipeline + cross-source label harmonisation (E4 §3-4) —
+  # a real investment for ONE phase-2 organism. Revisit for the 2nd paper; the
+  # thesis panel is phase 1 (E. coli, K. pneumoniae, S. aureus, A. baumannii) and
+  # does not depend on this.
+  enterobacter_cloacae:
+    display_name: "Enterobacter cloacae complex"
+    taxid: 550   # NB: the ECC members carry their own taxids — see the note above
+    gram_stain: negative
+    phylum: Pseudomonadota
+    eskapee_phase: 2
+    status: excluded_insufficient_data
+    priority_classes: [cephalosporins, carbapenems]   # AmpC hyperproduction + KPC/NDM
+    metadata_file: "data/external/enterobacter_cloacae/metadata/amr_phenotypes.csv"
+    genome_id_column: "Genome ID"
+    genomes_dir: "data/raw/enterobacter_cloacae/genomes"
+    source: "BV-BRC"
+    download_date: null
+    filter_criteria: null
+    # PROVISIONAL — never curated; the organism did not clear the data threshold:
+    antibiotics: [meropenem, imipenem, cefotaxime, ceftazidime, cefepime, ciprofloxacin, gentamicin]

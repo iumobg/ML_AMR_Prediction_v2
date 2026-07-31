@@ -37,8 +37,6 @@ Memory Management Strategy:
 # ============================================================================
 import pandas as pd
 import numpy as np
-import subprocess
-import os
 import yaml
 from pathlib import Path
 from scipy.sparse import csr_matrix, save_npz
@@ -46,6 +44,9 @@ from tqdm import tqdm
 import sys
 import gc  # Garbage collector for explicit memory management
 import array
+
+# Shared safe subprocess wrapper (shlex-based, NO shell=True) — see scripts/utils.py
+from utils import run_command
 
 
 # ============================================================================
@@ -64,10 +65,19 @@ if not CONFIG_PATH.exists():
 with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
     config = yaml.safe_load(f)
 
-# Extract configuration values
-TARGET_ANTIBIOTIC = config['project']['target_antibiotic']
+# Organism-aware path resolution (SCALE_MLOPS_PLAN §4.2)
+from lib.config import get_target, resolve_path, resolve_tool
+
+# Extract target via get_target: CLI-arg > AMR_ORGANISM/AMR_ANTIBIOTIC env >
+# config (parallel per-(organism,antibiotic) runs without a config edit, like 03u).
+ORGANISM, TARGET_ANTIBIOTIC = get_target(config=config)
 K_LENGTH          = config['preprocessing']['k_length']   # Must match 02_kmer_extraction.py
-MIN_SUPPORT       = config['preprocessing']['min_support']
+# Data-adaptive minimum support (see config comments). MIN_SUPPORT is an optional
+# hard override; when null the effective value is derived from the genome count
+# at runtime via resolve_min_support().
+MIN_SUPPORT       = config['preprocessing'].get('min_support', None)
+MIN_SUPPORT_FLOOR = int(config['preprocessing'].get('min_support_floor', 5))
+MIN_PREVALENCE    = float(config['preprocessing'].get('min_prevalence', 0.0))
 CHUNK_SIZE        = config['preprocessing']['chunk_size']
 KMC_MEMORY_GB     = config['preprocessing']['kmc_mem']
 THREADS           = config['preprocessing']['threads']
@@ -75,19 +85,22 @@ THREADS           = config['preprocessing']['threads']
 # ============================================================================
 # CROSS-PLATFORM COMPATIBLE PATHS (ANTIBIOTIC-SPECIFIC)
 # ============================================================================
-# Global paths (shared across all antibiotics)
-RAW_GENOMES_DIR = PROJECT_ROOT / config['paths']['raw_genomes_dir']
-METADATA_FILE = PROJECT_ROOT / config['paths']['metadata_file']
+# Organism-scoped paths (resolved via lib.config)
+RAW_GENOMES_DIR = resolve_path('raw_genomes_dir', organism=ORGANISM, config=config)
+METADATA_FILE = resolve_path('metadata_file', organism=ORGANISM, config=config)
 
-# Antibiotic-specific paths
 # K-mer specific directories
-KMC_OUTPUTS_DIR = PROJECT_ROOT / config['paths']['kmc_outputs_dir']
-MATRIX_OUTPUT_DIR = PROJECT_ROOT / config['paths']['matrix_dir'].format(antibiotic=TARGET_ANTIBIOTIC)
+KMC_OUTPUTS_DIR = resolve_path('kmc_outputs_dir', organism=ORGANISM, config=config)
+MATRIX_OUTPUT_DIR = resolve_path('matrix_dir', organism=ORGANISM, antibiotic=TARGET_ANTIBIOTIC, config=config)
 TEMP_DIR = KMC_OUTPUTS_DIR / "tmp"
 
-# KMC binaries (global)
-KMC_BIN = PROJECT_ROOT / "bin" / "bin" / "kmc"
-KMC_TOOLS_BIN = PROJECT_ROOT / "bin" / "bin" / "kmc_tools"
+# KMC binaries — PATH-aware (conda/module on Linux/HPC; bundled macOS binary is
+# only a Darwin fallback). Override with AMR_KMC_BIN / AMR_KMC_TOOLS_BIN.
+KMC_BIN = resolve_tool('kmc_bin', 'kmc', config=config)
+KMC_TOOLS_BIN = resolve_tool('kmc_tools_bin', 'kmc_tools', config=config)
+if not KMC_BIN or not KMC_TOOLS_BIN:
+    sys.exit("ERROR: KMC not found. Install KMC (conda install -c bioconda kmc) so "
+             "`kmc`/`kmc_tools` are on PATH, or set AMR_KMC_BIN / AMR_KMC_TOOLS_BIN.")
 
 # Create output directories
 MATRIX_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -97,37 +110,9 @@ TEMP_DIR.mkdir(parents=True, exist_ok=True)
 # ============================================================================
 # UTILITY FUNCTIONS
 # ============================================================================
-def run_command(command):
-    """
-    Execute a shell command with error handling and stderr capture.
-    
-    Stdout is suppressed to keep console output clean, while stderr is
-    captured and printed upon failure to aid in debugging KMC/kmc_tools errors.
-    
-    Args:
-        command (str): Shell command to execute
-    
-    Raises:
-        SystemExit: If command execution fails, with stderr message printed
-    """
-    try:
-        result = subprocess.run(
-            command,
-            shell=True,
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,   # Capture stderr for diagnostics
-            text=True
-        )
-    except subprocess.CalledProcessError as e:
-        print(f"ERROR: Command failed: {command}")
-        print(f"Return code: {e.returncode}")
-        if e.stderr:
-            # Print first 5 lines of stderr to avoid flooding the console
-            stderr_lines = e.stderr.strip().splitlines()
-            for line in stderr_lines[:5]:
-                print(f"  STDERR: {line}")
-        sys.exit(1)
+# run_command() is imported from utils.py. It tokenises with shlex and runs
+# with shell=False, eliminating the previous shell-injection vector (a genome
+# ID / path containing shell metacharacters can no longer execute commands).
 
 
 # ============================================================================
@@ -168,7 +153,11 @@ def create_feature_matrix():
     print("FEATURE MATRIX CONSTRUCTION - CHUNKED PROCESSING")
     print("=" * 80)
     print(f"Target antibiotic: {TARGET_ANTIBIOTIC}")
-    print(f"Minimum support: {MIN_SUPPORT} genomes")
+    if MIN_SUPPORT is not None:
+        print(f"Minimum support: {MIN_SUPPORT} genomes (config override)")
+    else:
+        print(f"Minimum support: adaptive = max({MIN_SUPPORT_FLOOR}, "
+              f"ceil({MIN_PREVALENCE} x n_genomes)) — resolved after QC")
     print(f"Chunk size: {CHUNK_SIZE} genomes")
     print("=" * 80)
 
@@ -193,7 +182,7 @@ def create_feature_matrix():
         print(f"  ✓ Genomes with {TARGET_ANTIBIOTIC} labels: {len(metadata_filtered)}")
         
         # --- LOAD QC OUTLIERS ---
-        outlier_file = PROJECT_ROOT / config['paths']['dir_global_exploration'] / "global_qc_outliers.csv"
+        outlier_file = resolve_path('dir_global_exploration', organism=ORGANISM, config=config) / "global_qc_outliers.csv"
         outlier_ids = set()
         if outlier_file.exists():
             outliers_df = pd.read_csv(outlier_file)
@@ -300,18 +289,44 @@ def create_feature_matrix():
             # Filter out zero-variance features (core genome k-mers present in 100% of samples)
             # If a k-mer is in all genomes, its frequency is len(valid_genomes). We set max allowed to len - 1.
             max_support = len(valid_genomes) - 1
-            
+
+            # Data-adaptive minimum support: scale with the genome count so the
+            # same config works across antibiotics/organisms of very different
+            # sizes (see config comments). Explicit MIN_SUPPORT overrides.
+            if MIN_SUPPORT is not None:
+                eff_min_support = int(MIN_SUPPORT)
+                _ms_src = "config override"
+            else:
+                from math import ceil
+                eff_min_support = max(MIN_SUPPORT_FLOOR,
+                                      ceil(MIN_PREVALENCE * len(valid_genomes)))
+                _ms_src = (f"adaptive: max(floor={MIN_SUPPORT_FLOOR}, "
+                           f"ceil({MIN_PREVALENCE}*{len(valid_genomes)}))")
+            eff_min_support = min(eff_min_support, max(1, max_support))  # never exceed max
+
             # Run KMC on ALL genomes to identify k-mers meeting minimum support.
             # K-mer length uses K_LENGTH from config (consistent with 02_kmer_extraction.py).
-            # -ci{MIN_SUPPORT} filters rare k-mers present in fewer than MIN_SUPPORT genomes.
+            #
+            # IMPORTANT — semantics caveat:
+            #   -ci / -cx filter on the TOTAL OCCURRENCE COUNT of a k-mer across the
+            #   concatenated multi-FASTA input, NOT on the strict number of distinct
+            #   genomes it appears in (document frequency). For assembled bacterial
+            #   genomes most informative k-mers occur ~once per genome, so this
+            #   occurrence count is a close PROXY for genome prevalence. It can,
+            #   however, over-count k-mers that repeat within a single genome
+            #   (e.g. multi-copy elements, rRNA operons). This is an accepted
+            #   approximation here; a strict document-frequency filter would require
+            #   per-genome canonicalisation and is noted as future work.
+            # -ci{MIN_SUPPORT} filters rare k-mers (occurrence count < MIN_SUPPORT).
             kmc_cmd = (
                 f"{KMC_BIN} -k{K_LENGTH} -m{KMC_MEMORY_GB} -t{THREADS} "
-                f"-ci{MIN_SUPPORT} -cx{max_support} -fm @{global_genome_list} "
+                f"-ci{eff_min_support} -cx{max_support} -fm @{global_genome_list} "
                 f"{global_db} {TEMP_DIR}"
             )
-            
+
             print("  Running KMC to extract global k-mer vocabulary...")
-            print(f"  Filtering parameters: min_support={MIN_SUPPORT} (noise), max_support={max_support} (zero-variance core)")
+            print(f"  Filtering parameters: min_support={eff_min_support} ({_ms_src}), "
+                  f"max_support={max_support} (zero-variance core)")
             run_command(kmc_cmd)
             
             # Export k-mer database to text format (k-mer sequence + count)
@@ -394,53 +409,55 @@ def create_feature_matrix():
         
         print(f"  [Chunk {chunk_id+1}/{num_chunks}] Processing {len(chunk_genomes)} genomes...")
         
-        # Initialize sparse matrix components
-        # For CSR format, we need: data values, row indices, column indices
-        col_indices = array.array('i')  # Signed 32-bit integer for column indices
-        indptr = array.array('q', [0])  # Signed 64-bit integer for row pointers
-        
-        # Process each genome in the chunk
-        for local_genome_idx, genome_id in enumerate(tqdm(chunk_genomes, leave=False, desc=f"    Chunk {chunk_id+1}")):
-            
+        # Build each genome's column indices in parallel — kmc_tools dump per
+        # genome is the bottleneck; a thread pool (workers = preprocessing.threads)
+        # saturates the core allocation. ThreadPoolExecutor.map preserves genome
+        # order, so the CSR indptr stays correct.
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _dump_cols(genome_id):
             kmc_db = KMC_OUTPUTS_DIR / genome_id
             temp_dump_file = TEMP_DIR / f"{genome_id}_dump.txt"
-            
+            cols = []
             try:
-                # Export k-mer database to text format
-                dump_cmd = f"{KMC_TOOLS_BIN} transform {kmc_db} dump {temp_dump_file}"
-                run_command(dump_cmd)
-                
-                # Read k-mers and populate matrix
+                run_command(f"{KMC_TOOLS_BIN} transform {kmc_db} dump {temp_dump_file}")
                 with open(temp_dump_file, 'r', encoding='utf-8') as f:
                     for line in f:
-                        kmer_sequence = line.split()[0]
-                        
-                        # Only include k-mers that are in the global vocabulary
-                        if kmer_sequence in kmer_to_index:
-                            col_idx = kmer_to_index[kmer_sequence]
-                            col_indices.append(col_idx)
-                    
+                        ci = kmer_to_index.get(line.split()[0])
+                        if ci is not None:
+                            cols.append(ci)
             except Exception as e:
                 print(f"    WARNING: Failed to process {genome_id}: {e}")
-                continue
             finally:
-                # Guarantee cleanup of the per-genome temporary dump file
-                # regardless of success or failure, to prevent disk space leaks.
                 if temp_dump_file.exists():
                     temp_dump_file.unlink()
-            
-            indptr.append(len(col_indices))
+            return cols
+
+        col_indices = array.array('i')
+        indptr = array.array('q', [0])
+        with ThreadPoolExecutor(max_workers=max(1, int(THREADS))) as _ex:
+            for cols in _ex.map(_dump_cols, chunk_genomes):
+                col_indices.extend(cols)
+                indptr.append(len(col_indices))
         
         # Construct sparse matrix for this chunk
         # shape = (number of genomes in chunk, total number of features)
         # dtype=np.int8 saves memory (only need 0 or 1)
         chunk_matrix = csr_matrix(
-            (np.ones(len(col_indices), dtype=np.int8), 
-             np.frombuffer(col_indices, dtype=np.int32), 
+            (np.ones(len(col_indices), dtype=np.int8),
+             np.frombuffer(col_indices, dtype=np.int32),
              np.frombuffer(indptr, dtype=np.int64)),
             shape=(len(chunk_genomes), num_features)
         )
-        
+
+        # Safety: guarantee strict binary (presence/absence) encoding. Each
+        # k-mer is dumped once per genome by kmc_tools, so duplicates should not
+        # occur — but if any (genome, k-mer) pair appeared twice, csr_matrix
+        # SUMS the values, yielding a 2 and silently breaking the binary
+        # assumption. Clamp any accumulated value back to 1.
+        if chunk_matrix.nnz > 0 and chunk_matrix.data.max() > 1:
+            np.clip(chunk_matrix.data, 0, 1, out=chunk_matrix.data)
+
         # Save chunk to disk in compressed sparse format
         save_npz(chunk_output_file, chunk_matrix)
         print(f"    ✓ Saved: {chunk_output_file}")
@@ -475,4 +492,13 @@ def create_feature_matrix():
 # SCRIPT ENTRY POINT
 # ============================================================================
 if __name__ == "__main__":
-    create_feature_matrix()
+    # Global guard: any unhandled exception (disk full, OOM, etc.) is reported
+    # with a full traceback and forces a non-zero exit, so a crash cannot leave
+    # partial outputs that a later run silently treats as complete.
+    import traceback
+    try:
+        create_feature_matrix()
+    except Exception as e:
+        print(f"\nFATAL ERROR: {e}")
+        traceback.print_exc()
+        sys.exit(1)

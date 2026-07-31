@@ -2,6 +2,19 @@
 
 > **A rigorous technical exposition of the biological, mathematical, and statistical foundations of the AMR prediction pipeline.**
 
+> ⚠️ **Canonical pipeline (2026-07, schema 0.4.0) vs this document.** After the
+> literature-review pivot (`docs/ROADMAP.md` §0), the *canonical* feature unit is
+> the **unitig** (compacted de Bruijn graph, `bcalm2`/`unitig-caller`; step 03u),
+> the *canonical* validation is **lineage-aware CV** (PopPUNK + StratifiedGroupKFold,
+> step 07b), stability is **CPSS** (B=100, π≥0.6, PFER-bounded; step 13) with
+> **TreeSHAP** importance, and biomarkers additionally carry pyseer-LMM significance
+> (step 14), CARD SNP-allele checks (step 11), genome QC (CheckM2+QUAST; step 02d)
+> and external AMRFinderPlus/ResFinder concordance (step 16, M13). **Sections 1–3
+> below describe the raw-k-mer / Gain / single-split *baseline* (still a valid,
+> runnable path) — read them as the foundation, not the current canonical method;**
+> §4.4 and `docs/ROADMAP.md` §0 are authoritative where they differ. A full rewrite
+> to unitig-first is tracked (audit Issue 1).
+
 ---
 
 ## Table of Contents
@@ -12,10 +25,12 @@
    - [3.1 Binary Histogram Quantization (`max_bin = 2`)](#31-binary-histogram-quantization-max_bin--2)
    - [3.2 Optuna HPO and the Square Root Heuristic](#32-optuna-hpo-and-the-square-root-heuristic)
    - [3.3 Stratified Linspace Chunk Selection](#33-stratified-linspace-chunk-selection)
-   - [3.4 Epoch-Based Incremental Learning](#34-epoch-based-incremental-learning)
+   - [3.4 Full-Data Boosting over a Streaming `QuantileDMatrix`](#34-full-data-boosting-over-a-streaming-quantiledmatrix)
 4. [Explainable AI and Biological Validation](#4-explainable-ai-and-biological-validation)
    - [4.1 Feature Importance Mapping](#41-feature-importance-mapping)
    - [4.2 Automated Nextflow BLAST Pipeline](#42-automated-nextflow-blast-pipeline)
+   - [4.3 Automated Biological Reporting](#43-automated-biological-reporting)
+   - [4.4 Statistical Signal ≠ Biological Causation (reification safeguard)](#44-statistical-signal--biological-causation-reification-safeguard)
 
 ---
 
@@ -115,11 +130,31 @@ compared to a dense matrix requiring $\mathcal{O}(n \cdot p)$ bytes. For our pro
 
 ### 2.4 Prevalence Filtering and Matrix Dimensionality Reduction
 
-Before model training, uninformative k-mers are removed by filtering features based on prevalence across genomes. A k-mer present in all genomes carries no discriminative signal (provides no variance), as does one present in none. Formally, for feature $j$:
+Before model training (step 03), uninformative k-mers are removed by filtering on
+prevalence across genomes. A k-mer present in (nearly) all genomes carries no
+discriminative signal, and one present in too few is rare noise / lineage-specific.
+For feature $j$ over $n$ genomes we keep:
 
-$$\text{keep}_j = \mathbf{1}\left[ \epsilon < \frac{\sum_{i=1}^{n} X_{ij}}{n} < 1 - \epsilon \right]$$
+$$\text{keep}_j = \mathbf{1}\left[\; s_{\min} \le \sum_{i=1}^{n} X_{ij} \le n-1 \;\right]$$
 
-where $\epsilon$ is a small threshold (e.g., $\epsilon = 0.001$). This reduces $p$ from tens of millions to a more manageable but still very large set of informative, discriminative features.
+The upper bound $n-1$ drops zero-variance core-genome k-mers. The lower bound
+$s_{\min}$ (minimum support) is **data-adaptive** rather than a fixed count, so the
+same configuration behaves sensibly across antibiotics/organisms of very different
+sizes:
+
+$$s_{\min} = \max\!\left(\, s_{\text{floor}},\; \lceil \rho \cdot n \rceil \,\right)$$
+
+with an absolute noise floor $s_{\text{floor}} = 5$ (removes singleton/sequencing-error
+k-mers regardless of $n$) and a prevalence fraction $\rho = 0.01$ (1%). Thus a large
+dataset (e.g. $n=4373$ → $s_{\min}=44$) gets aggressive de-confounding of the rare,
+often lineage-specific tail, while a small one ($n \le 500 → s_{\min}=5$) falls back to
+the floor and keeps all real markers. The 1% floor is deliberately far below the
+$\sim$10%-prevalence a k-mer needs to reach the discriminativeness criterion of the
+background-frequency analysis ($|\Delta\text{prev}| \ge 0.10$), so no individually
+informative marker is discarded — only the noise/confounder tail. An explicit
+`preprocessing.min_support` integer overrides the formula when a fixed value is
+desired. This reduces $p$ from tens of millions to a smaller, more informative set
+while preserving discriminative features.
 
 ---
 
@@ -170,6 +205,16 @@ $$\texttt{colsample\\_bytree} = \frac{1}{\sqrt{5 \times 10^6}} \approx \frac{1}{
 
 This means each tree sees only ~0.045% of features — a massive regularization effect that simultaneously reduces computation from $\mathcal{O}(p \cdot n)$ per split to $\mathcal{O}(\sqrt{p} \cdot n)$.
 
+> **Implementation note.** The $1/\sqrt{p}$ value is used as the *anchor* of the
+> Optuna search space rather than a single fixed value. `04_optimization.py`
+> reads the actual feature count $p$ from `features.txt` and searches
+> `colsample_bytree` over a **log-scale window bracketing $1/\sqrt{p}$**
+> (`compute_colsample_range()`: roughly $[0.5/\sqrt{p},\, 20/\sqrt{p}]$). This
+> keeps the search consistent with the square-root heuristic while letting the
+> optimizer fine-tune around it. (Earlier versions hardcoded a fixed
+> `[0.05, 0.30]` window — ~100× larger than $1/\sqrt{p}$ — which contradicted
+> this derivation; that discrepancy has been removed.)
+
 #### Early Stopping for `n_estimators`
 
 Rather than letting Optuna randomly search over `n_estimators`, we **fix `num_boost_round = 1000`** and use XGBoost's built-in early stopping (patience = `early_stopping_rounds`). The optimal number of trees is determined empirically:
@@ -206,54 +251,27 @@ $$\left| \frac{1}{k} \sum_{j=1}^{k} r_{c_j} - \bar{r} \right|$$
 
 compared to random selection, by ensuring the selected ratios span the full observed range of $r_c$ values.
 
-### 3.4 Epoch-Based Incremental Learning
+### 3.4 Full-Data Boosting over a Streaming `QuantileDMatrix`
 
-#### Problem: Catastrophic Forgetting in Sequential Learning
+#### Problem: the matrix does not fit in RAM, but per-chunk training is weak
 
-Standard XGBoost `train()` with `xgb_model` (warm-starting) allows incremental tree addition. However, if chunks are always presented in the **same order**, the model successively updates gradients on each chunk — effectively overwriting knowledge from earlier chunks with signal from the most recently seen chunk. This is analogous to **catastrophic forgetting** in neural network sequential learning.
+The genome × k-mer matrix is far too large to hold densely in memory (e.g. ~109 GB decompressed for ~4.4k genomes × 50.8M k-mers, 21.8B non-zeros). An earlier version handled this by **incremental warm-started boosting** — one tree per chunk via repeated `xgb.train(num_boost_round=1, xgb_model=...)` over shuffled chunks. While this bounded memory, it had two drawbacks: **(i)** each tree was fit to the residuals of only a single ~200-genome chunk, so no tree ever saw the full training distribution (a weaker fit than standard boosting); and **(ii)** the work was dominated by serial chunk decompression with tiny per-tree compute, leaving HPC cores idle (a TRUBA low-efficiency warning at ~13% utilisation).
 
-Specifically: if chunks $\{1, 2, \ldots, C\}$ are always trained in this order, the final gradient updates predominantly reflect the distribution of chunk $C$, biasing predictions toward isolates in the tail of the dataset.
+#### Solution: stream chunks into one quantised DMatrix, then boost normally
 
-#### Solution: Epoch-Based Shuffled Training
+XGBoost's external-data iterator API lets us build a **single** in-core, quantised `QuantileDMatrix` by pulling one chunk at a time, without ever materialising the full sparse matrix. We implement `ChunkDMatrixIter` (`scripts/lib/xgb_data.py`), an `xgb.DataIter` whose `next()` loads chunk $c$, optionally applies a sample-level row mask (used by 07b's seed splits), and feeds $(X_c, y_c, w_c)$ to XGBoost. Because the data are binary, `max_bin = 2` makes the quantised histogram ~1 byte per non-zero, so the resulting DMatrix is compact (~22 GB here) and peak memory stays at roughly **one chunk + the histogram**.
 
-We define an **epoch** as a complete pass through all $C$ training chunks. Over $E$ epochs, we perform $E \times C$ incremental `xgb.train()` calls with `num_boost_round = 1` each time, shuffling the chunk order at the beginning of every epoch.
+Training is then ordinary gradient boosting on the whole training set:
 
-The training sequence across epochs is:
+$$\mathcal{L}^{(t)} = \sum_{i=1}^{N_{\text{train}}} \ell\!\left(y_i,\, \hat{y}_i^{(t-1)} + f_t(x_i)\right) + \Omega(f_t)$$
 
-$$\text{Epoch 1: } \pi^{(1)}(1),\, \pi^{(1)}(2),\, \ldots,\, \pi^{(1)}(C)$$
-$$\text{Epoch 2: } \pi^{(2)}(1),\, \pi^{(2)}(2),\, \ldots,\, \pi^{(2)}(C)$$
-$$\vdots$$
-$$\text{Epoch } E: \pi^{(E)}(1),\, \pi^{(E)}(2),\, \ldots,\, \pi^{(E)}(C)$$
+where the sum now runs over **all** $N_{\text{train}}$ training rows for every tree $f_t$, not a single chunk. The number of trees $T_{\text{total}}$ is the `n_estimators` budget found by early stopping during HPO (Section 3.3); we keep `num_boost_round = T_{\text{total}}` over the full DMatrix.
 
-where $\pi^{(e)}$ is a random permutation of $\{1, \ldots, C\}$ drawn independently for each epoch $e$.
+#### Class imbalance
 
-#### Why This Prevents Forgetting
+Imbalance is corrected **once**, globally: positive rows receive instance weight $w^{+} = N^{-}_{\text{train}} / N^{+}_{\text{train}}$ (negatives weighted 1.0). HPO (Section 3.3) deliberately leaves `scale_pos_weight` untuned so the correction is applied a single time at training, never double-counted. The operating threshold is fixed at $0.5$ and is **not** tuned on the test set (leakage prevention; Section 4 / `06_evaluation.py` only reports Youden's J).
 
-The gradient boosting objective at tree-building step $t$ is:
-
-$$\mathcal{L}^{(t)} = \sum_{i=1}^{n_{\text{chunk}}} \ell\left(y_i,\, \hat{y}_i^{(t-1)} + f_t(x_i)\right) + \Omega(f_t)$$
-
-Each new tree $f_t$ is fit to the **residuals of the current ensemble** on the **current mini-batch**. The key insight is:
-
-> **XGBoost's additive structure is not overwritten.** Previously added trees $\{f_1, \ldots, f_{t-1}\}$ are immutable. New trees $f_t$ correct their mistakes on whatever batch is currently shown.
-
-Shuffling ensures that over $E$ epochs, each chunk appears in every possible ordinal position in the training sequence, guaranteeing that:
-
-1. **No systematic positional bias** is introduced — no chunk systematically dominates late-stage gradient updates.
-2. **Every genomic region** (different chunks may contain genomes from different collection sites or clades) contributes equally to refining the ensemble.
-3. **Convergence stability** improves: the learning rate schedule effectively sees a smoothed gradient signal averaged across the shuffled chunk order.
-
-#### Total Trees and Learning Rate
-
-With $E$ epochs, $C$ chunks, and 1 tree per chunk per epoch:
-
-$$T_{\text{total}} = E \times C$$
-
-The effective learning rate per epoch is $\eta$ (XGBoost `learning_rate`), which must be chosen small enough that the ensemble does not overfit within a single chunk pass. The standard recommendation is:
-
-$$\eta \leq \frac{1}{\sqrt{T_{\text{total}}}}$$
-
-ensuring the cumulative update magnitude scales appropriately with the number of boosting rounds.
+This same regime is reused by `07b_feature_stability.py`: each of the 5 seeds builds its own train-split `QuantileDMatrix` via a sample-level `row_mask`, so the stability analysis is methodologically identical to the final model. Both are organism/antibiotic-agnostic — the iterator simply streams whatever chunk files it is given.
 
 ### 3.5 Reproducibility & MLOps Best Practices
 
@@ -282,6 +300,20 @@ To translate mathematical importance into biological relevance, we employ a dual
 
 To bridge the gap between raw alignment metrics (BLAST `outfmt 6` TSV format) and final biological discovery, an automated reporting mechanism (`09_biological_summary.py`) distills the pipeline's outputs into a synthesized summary. By enforcing strict FASTA header ID matching (e.g., `Rank_1|Score_154.4288|Feature_...`) and implementing regex-based text mining, the script filters low-quality alignments and extracts precise AMR determinants. It cleanly isolates specific resistance symbols (like `OXA-909` or `msbA`) from CARD and unambiguous species/strain identifiers from NCBI, ultimately generating a human-readable, publication-ready Markdown report.
 
+### 4.4 Statistical Signal ≠ Biological Causation (reification safeguard)
+
+Every claim the knowledge base makes about a unitig is **associational, not causal**, and the pipeline is worded and structured to keep that distinction explicit (ROADMAP S10; cf. Takefuji 2025 on the over-interpretation of feature-importance). A high XGBoost gain, a stable CPSS selection frequency, or a large SHAP value means only that a feature *carries predictive signal for the resistance label in this population* — it does **not** establish that the sequence *causes*, *confers*, or *mechanistically determines* resistance. Reporting therefore uses associational verbs ("is associated with", "is predictive of", "co-occurs with") and never causal ones ("causes", "confers", "is responsible for") outside of determinants independently confirmed by an orthogonal, mechanism-aware line of evidence.
+
+Three structural safeguards operationalise this:
+
+1. **Layered, orthogonal evidence rather than a single score.** A biomarker is only elevated to a strong tier when independent lines agree: importance/stability (gain, CPSS π≥0.6, PFER bound), sequence identity to a curated determinant (CARD/ARO BLAST tier), discriminativeness (R-vs-S Δprevalence + Fisher/BH-FDR), allele-level confirmation for SNP mechanisms (step 11 variant model), population-structure-corrected association (pyseer LMM + Bonferroni), and external genotype–phenotype concordance (AMRFinderPlus/ResFinder, M13). Any one alone is treated as a hypothesis, not a fact.
+
+2. **Confounding is measured, not assumed away.** Lineage-aware GroupKFold (PopPUNK) and pyseer's kinship random effect quantify how much of a signal is clonal/lineage co-carriage versus mechanism-driven. The cross-antibiotic H3 result is reported honestly as a *negative* finding (ampicillin=TEM vs cefotaxime=CTX-M/CMY share no gene family; the only β-lactamase overlap is cross-class CTX-M co-carriage) precisely because the method refuses to manufacture a mechanistic story the data does not support.
+
+3. **Provenance over assertion.** Each `validation_evidence` row records the *evidence type, source (tool + version), score, and pipeline run* — so a KB consumer sees *why* a claim is tiered as it is and can re-derive it, rather than trusting an unqualified label. "Novel candidate" strictly means "no curated homolog found", an explicit knowledge gap, not a discovery claim.
+
+This makes the KB's epistemic status auditable: it is a ranked, confidence-tiered, reproducible catalogue of *statistical AMR signals with biological context*, not a claim of causal mechanism.
+
 ---
 
 ## Summary of Design Decisions
@@ -294,7 +326,7 @@ To bridge the gap between raw alignment metrics (BLAST `outfmt 6` TSV format) an
 | `colsample_bytree = 1/√p` | Overfitting + computational cost | Square Root Heuristic for column subsampling |
 | Optuna TPE + early stopping | Conflicting HPO and early stopping | Fixed `num_boost_round`; `best_iteration` captured |
 | Stratified linspace chunk selection | Biased mini-batch resistance ratios | Sorted-by-ratio linspace chunk indexing |
-| Epoch-based shuffled training | Catastrophic forgetting in sequential learning | Per-epoch random permutation of chunk order |
+| Streaming `QuantileDMatrix` + full-data boosting | Matrix too large for RAM, yet per-chunk training is weak/inefficient | `ChunkDMatrixIter` streams chunks into one quantised DMatrix; standard boosting sees all train rows per tree |
 | Nextflow Dual-BLAST (CARD + NCBI) | Black-box ML lack of biological interpretability | Asynchronous pipeline mapping mathematical Gain scores back to known physical AMR mechanisms (SNPs & Plasmids). |
 | MLOps Artifact Versioning | Accidental loss of high-cost optimization and model binaries | Strict timestamp-based backup system protecting historical Optuna studies and models. |
 | Source Data Extraction | Opaque, irreproducible numerical plots | Automated parallel export of plot arrays to `.csv` for transparent third-party rendering. |
@@ -302,4 +334,4 @@ To bridge the gap between raw alignment metrics (BLAST `outfmt 6` TSV format) an
 
 ---
 
-*Document version: March 2026. Maintained alongside `scripts/` as the canonical mathematical reference for the pipeline.*
+*Document version: July 2026 (§4.4 + canonical-pipeline banner added; KB schema 0.4.0). Sections 1–3 document the raw-k-mer baseline; the canonical unitig / lineage-CV / CPSS pipeline is authoritative per `docs/ROADMAP.md` §0. Maintained alongside `scripts/` as the mathematical reference for the pipeline.*

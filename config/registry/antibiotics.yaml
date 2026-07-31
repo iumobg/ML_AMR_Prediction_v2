@@ -1,0 +1,321 @@
+# ============================================================================
+# ANTIBIOTIC REGISTRY — single source of truth for antibiotic → class mapping
+# ============================================================================
+# Replaces the ANTIBIOTIC_CLASSES dictionary previously copy-pasted in
+# 01_data_validation.py and 01b_data_validation.py (audit B09/B10).
+# Accessed via scripts/lib/registry.py.
+#
+# Adding/renaming an antibiotic class = editing this file only. No code change.
+#
+# TAXONOMY (schema 2.0, 2026-07-13): mechanism-based classes aligned to the
+# CARD ARO ontology (see docs/literature/ESKAPEE1.md §3-5). Two deliberate
+# design rules for the ML pipeline:
+#   1. CARBAPENEMS are their OWN class (never lumped under beta-lactams) — a
+#      blaKPC/blaNDM carbapenemase is mechanistically miles from a blaTEM
+#      penicillinase; merging them would drown the specific signal in noise.
+#   2. NO "others" grab-bag — glycopeptides / polymyxins / oxazolidinones /
+#      phenicols / rifamycins / fosfomycins / lipopeptides / nitrofurans are
+#      each their own mechanism class. A drug with too little data is left OUT
+#      of scope, never merged into a mixed-mechanism bucket (that makes the
+#      genotype→phenotype map non-learnable).
+# Generic/inhibitor tokens with no clean ML target (bare "beta-lactam",
+# "sulbactam") are intentionally UNCLASSIFIED (antibiotic_to_class -> None).
+# ============================================================================
+schema_version: "2.0"
+
+classes:
+  penicillins:
+    display_name: "Penicillins"
+    members:
+      - ampicillin
+      - amoxicillin
+      - amoxicillin_clavulanic_acid
+      - piperacillin_tazobactam
+      - ampicillin_sulbactam
+      - penicillin
+      - oxacillin
+      - carbenicillin
+      - piperacillin
+      - "ticarcillin/clavulanic acid"
+
+  cephalosporins:
+    display_name: "Cephalosporins"
+    members:
+      - ceftazidime
+      - cefotaxime
+      - cefuroxime
+      - ceftriaxone
+      - cefepime
+      - cefoxitin
+      - cephalothin
+      - cefazolin
+      - ceftiofur
+      - cefpodoxime
+      - cefotetan
+      - "ceftazidime/avibactam"
+      - ceftaroline
+      - cephalexin
+      - cefpodoxime_clavulanic_acid
+      - "ceftolozane/tazobactam"
+      - "cefotaxime/clavulanic acid"
+      - cefpirome
+      - "cefepime/taniborbactam"
+
+  carbapenems:
+    display_name: "Carbapenems"
+    members:
+      - meropenem
+      - imipenem
+      - ertapenem
+      - doripenem
+      - "meropenem/vaborbactam"
+
+  monobactams:
+    display_name: "Monobactams"
+    members:
+      - aztreonam
+
+  aminoglycosides:
+    display_name: "Aminoglycosides"
+    members:
+      - gentamicin
+      - amikacin
+      - tobramycin
+      - streptomycin
+      - kanamycin
+      - apramycin
+      - neomycin
+      - netilmicin
+
+  quinolones:
+    display_name: "Quinolones"
+    members:
+      - ciprofloxacin
+      - norfloxacin
+      - levofloxacin
+      - "nalidixic acid"
+      - moxifloxacin
+      - ofloxacin
+
+  folate_pathway_inhibitors:
+    display_name: "Folate Pathway Inhibitors"
+    members:
+      - trimethoprim_sulfamethoxazole
+      - trimethoprim
+      - sulfamethoxazole
+      - sulfisoxazole
+
+  tetracyclines:
+    display_name: "Tetracyclines"
+    members:
+      - tetracycline
+      - doxycycline
+      - minocycline
+      - oxytetracycline
+
+  glycylcyclines:
+    display_name: "Glycylcyclines"
+    members:
+      - tigecycline
+
+  macrolides:
+    display_name: "Macrolides"
+    members:
+      - erythromycin
+      - azithromycin
+      - clarithromycin
+
+  lincosamides:
+    display_name: "Lincosamides"
+    members:
+      - clindamycin
+      - lincomycin
+
+  glycopeptides:
+    display_name: "Glycopeptides"
+    members:
+      - vancomycin
+      - teicoplanin
+
+  polymyxins:
+    display_name: "Polymyxins"
+    members:
+      - colistin
+      - "polymyxin B"
+
+  oxazolidinones:
+    display_name: "Oxazolidinones"
+    members:
+      - linezolid
+
+  phenicols:
+    display_name: "Phenicols"
+    members:
+      - chloramphenicol
+
+  rifamycins:
+    display_name: "Rifamycins"
+    members:
+      - rifampin
+
+  fosfomycins:
+    display_name: "Fosfomycins"
+    members:
+      - fosfomycin
+
+  lipopeptides:
+    display_name: "Lipopeptides"
+    members:
+      - daptomycin
+
+  nitrofurans:
+    display_name: "Nitrofurans"
+    members:
+      - nitrofurantoin
+
+# ============================================================================
+# ANTIBIOTIC NAME ALIASES (raw-source spelling variants / typos -> canonical)
+# ============================================================================
+# Single source for name normalisation, used by lib.registry.normalize_antibiotic()
+# when cleaning raw AMR downloads (step 00). The canonical (key) MUST also appear
+# as a `members` entry above so class grouping stays consistent. Raw names not
+# listed here pass through unchanged (case-insensitively matched to a member).
+#
+# NOTE: co-trimoxazole == trimethoprim/sulfamethoxazole (same drug) — merged into
+# one canonical to avoid an ambiguous alias mapping.
+aliases:
+  amoxicillin_clavulanic_acid: ["amoxicillin/clavulanic acid", "amoxicillin-clavulanic acid", "amoxicillin_clavulanat"]
+  # Canonical is the underscore form (slash-safe for file paths), same as the
+  # other combo drugs. It was previously inverted (slash canonical) — the M9 slash
+  # sweep missed it — which broke A. baumannii's paths (ampicillin/sulbactam is a
+  # key sulbactam-based therapy there, minority 405).
+  ampicillin_sulbactam: ["ampicillin/sulbactam", "ampicillin-sulbactam", "amipicillin_sulbactam"]
+  cephalothin: ["cefalotin", "cefalothin"]
+  cefpirome: ["cefpirom"]
+  ceftaroline: ["ceftarolin"]
+  "ceftazidime/avibactam": ["ceftazidime-avibactam", "ceftazidime_avibactam"]
+  "ceftolozane/tazobactam": ["ceftolozane-tazobactam"]
+  fosfomycin: ["phosphomycin"]
+  gentamicin: ["geamycin"]
+  piperacillin_tazobactam: ["piperacillin/tazobactam", "piperacillin-tazobactam", "tazobactam_piperacillin"]
+  "polymyxin B": ["polymyxin b", "polymyxin_b"]
+  rifampin: ["rifampicin"]
+  tetracycline: ["tetracyklin"]
+  tigecycline: ["tigecyklin"]
+  trimethoprim: ["trimotheprim"]
+  trimethoprim_sulfamethoxazole:
+    - "trimethoprim/sulfamethoxazole"
+    - "co-trimoxazole"
+    - "co_trimoxazole"
+    - "trimethoprim-sulfamethoxazole"
+    - "sulfamethoxazole/trimethoprim"
+  "ticarcillin/clavulanic acid": ["ticarcillin_clavulanate"]
+  "meropenem/vaborbactam": ["meropenem-vaborbactam"]
+  "cefepime/taniborbactam": ["cefepime_taniborbactam"]
+
+# ============================================================================
+# AMRFinderPlus Class/Subclass -> antibiotic keyword map (M13 concordance;
+# scripts/16_external_concordance.py, audit Issue 9). A genome is genotypic-R
+# for an antibiotic if any AMR-type AMRFinderPlus row's Class/Subclass tokens
+# intersect this set. Add an antibiotic here (no code change) to include it in
+# the concordance. Note the biology: a narrow BETA-LACTAM (TEM-1) implies
+# ampicillin-R but NOT cefotaxime-R (that needs an ESBL/AmpC -> CEPHALOSPORIN).
+# ============================================================================
+# NOTE (2026-07-07): tokens below cover the 17-model KB panel. They are
+# AMRFinderPlus Class/Subclass approximations — VERIFY against actual AFP output
+# when running M13 (16_external_concordance) on the new antibiotics; refine if a
+# determinant maps too broadly (see the narrow-vs-broad beta-lactam caveat above).
+amrfinder_keywords:
+  ampicillin:                    [AMPICILLIN, BETA-LACTAM]
+  amoxicillin_clavulanic_acid:   [AMOXICILLIN, BETA-LACTAM]
+  piperacillin_tazobactam:       [PIPERACILLIN, BETA-LACTAM]
+  ampicillin_sulbactam:          [AMPICILLIN, SULBACTAM, BETA-LACTAM]
+  cefotaxime:                    [CEFOTAXIME, CEPHALOSPORIN]
+  ceftazidime:                   [CEFTAZIDIME, CEPHALOSPORIN]
+  cefepime:                      [CEFEPIME, CEPHALOSPORIN]
+  cefoxitin:                     [CEFOXITIN, CEPHALOSPORIN, CEPHAMYCIN, METHICILLIN]
+  meropenem:                     [MEROPENEM, CARBAPENEM]
+  imipenem:                      [IMIPENEM, CARBAPENEM]
+  ciprofloxacin:                 [CIPROFLOXACIN, FLUOROQUINOLONE, QUINOLONE]
+  gentamicin:                    [GENTAMICIN, AMINOGLYCOSIDE]
+  tobramycin:                    [TOBRAMYCIN, AMINOGLYCOSIDE]
+  amikacin:                      [AMIKACIN, AMINOGLYCOSIDE]
+  levofloxacin:                  [LEVOFLOXACIN, FLUOROQUINOLONE, QUINOLONE]
+  tetracycline:                  [TETRACYCLINE]
+  trimethoprim_sulfamethoxazole: [TRIMETHOPRIM, SULFAMETHOXAZOLE, SULFONAMIDE]
+  oxacillin:                     [OXACILLIN, METHICILLIN]
+  erythromycin:                  [ERYTHROMYCIN, MACROLIDE]
+  clindamycin:                   [CLINDAMYCIN, LINCOSAMIDE]
+
+# ============================================================================
+# DOMINANT RESISTANCE MECHANISM per class — acquired gene vs target-gene SNP.
+# The thesis "acquired vs target-SNP" showcase axis; consumed by
+# populate_database (antibiotics.mechanism_type via lib.registry). For classes
+# not yet in the KB the value is the literature-dominant style (provisional —
+# refine when that class is actually modelled).
+# ============================================================================
+class_mechanism_type:
+  penicillins: acquired
+  cephalosporins: acquired
+  carbapenems: acquired
+  monobactams: acquired
+  aminoglycosides: acquired
+  quinolones: target_snp            # gyrA/parC
+  folate_pathway_inhibitors: acquired
+  tetracyclines: acquired
+  glycylcyclines: acquired
+  macrolides: acquired
+  lincosamides: acquired
+  glycopeptides: acquired           # vanA/vanB operons
+  polymyxins: target_snp            # pmrAB/lpx chromosomal dominant (mcr acquired also exists)
+  oxazolidinones: target_snp        # 23S rRNA / rplC-rplD (cfr acquired is a minority)
+  phenicols: acquired               # cat genes
+  rifamycins: target_snp            # rpoB
+  fosfomycins: acquired             # fosA (chromosomal murA/transporter SNPs also occur)
+  lipopeptides: target_snp          # mprF/cls
+  nitrofurans: target_snp           # nfsA/nfsB
+
+# ============================================================================
+# WHO AWaRe 2023 category per antibiotic (Access / Watch / Reserve). Clinical
+# stewardship context only — NOT an ML class axis (ESKAPEE1.md §3). Consumed by
+# populate_database (antibiotics.who_aware). Antibiotics not listed -> null.
+# ============================================================================
+who_aware:
+  ampicillin: Access
+  amoxicillin: Access
+  amoxicillin_clavulanic_acid: Access
+  penicillin: Access
+  oxacillin: Access
+  ampicillin_sulbactam: Access
+  piperacillin_tazobactam: Watch
+  cefotaxime: Watch
+  ceftazidime: Watch
+  ceftriaxone: Watch
+  cefepime: Watch
+  cefoxitin: Watch
+  cefazolin: Watch
+  meropenem: Watch
+  imipenem: Watch
+  ertapenem: Watch
+  aztreonam: Watch
+  ciprofloxacin: Watch
+  levofloxacin: Watch
+  gentamicin: Access
+  amikacin: Access
+  tobramycin: Access
+  tetracycline: Access
+  tigecycline: Reserve
+  trimethoprim_sulfamethoxazole: Access
+  trimethoprim: Access
+  erythromycin: Watch
+  clindamycin: Access
+  vancomycin: Watch
+  teicoplanin: Watch
+  linezolid: Reserve
+  daptomycin: Reserve
+  colistin: Reserve
+  "polymyxin B": Reserve
+  chloramphenicol: Access
+  rifampin: Watch
+  fosfomycin: Access
+  nitrofurantoin: Access

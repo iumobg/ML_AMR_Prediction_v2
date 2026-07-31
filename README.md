@@ -1,111 +1,269 @@
-# ML AMR Prediction Framework: Alignment-Free WGS Out-of-Core Learning
+# ML AMR Prediction Framework v2 — Alignment-Free WGS Out-of-Core Learning
 
-![Python Version](https://img.shields.io/badge/python-3.9%2B-blue.svg)
-![Machine Learning](https://img.shields.io/badge/ML-XGBoost-orange.svg)
-![Pipeline](https://img.shields.io/badge/pipeline-Nextflow-brightgreen.svg)
-![Status](https://img.shields.io/badge/status-active-success.svg)
+![CI](https://github.com/demirbase/ML_AMR_Prediction_v2/actions/workflows/ci.yml/badge.svg)
+![Python](https://img.shields.io/badge/python-3.10%E2%80%933.12-blue.svg)
+![ML](https://img.shields.io/badge/ML-XGBoost-orange.svg)
+![Tests](https://img.shields.io/badge/tests-pytest-green.svg)
+![Lint](https://img.shields.io/badge/lint-ruff-261230.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
 ## Abstract
-The **ML AMR Prediction Framework** is a highly scalable, multi-antibiotic machine learning pipeline designed to predict Antimicrobial Resistance (AMR) directly from raw Whole Genome Sequencing (WGS) data. Utilizing a rapid, alignment-free k-mer extraction methodology, the framework discovers the underlying biological resistance mechanisms autonomously, entirely bypassing reference genomes. Its highly extensible architecture enables predicting resistance across ANY antibiotic and pathogen pair with optimal performance. Currently, the framework utilizes **Ciprofloxacin** as the primary capability benchmark to demonstrate the power of the end-to-end analytical pipeline.
+
+A scalable, **multi-organism / multi-antibiotic** machine-learning pipeline that
+predicts Antimicrobial Resistance (AMR) directly from Whole Genome Sequencing
+(WGS) assemblies. It uses an **alignment-free k-mer** representation (no
+reference genome) and **out-of-core XGBoost** to train over tens of millions of
+features on commodity hardware, then **reverse-translates** the most important
+k-mers into biology via BLAST (CARD + NCBI). The current dataset is *Escherichia
+coli* across four antibiotics (ampicillin, cefotaxime, ciprofloxacin,
+gentamicin); adding a new organism is a registry entry, not a code change.
 
 ---
 
-## The Three Core Pillars
+## Three core pillars
 
-### 1. The Computer Science / Informatics
-Dealing with high-dimensional genomic features often results in severe computational bottlenecks. This framework addresses the RAM bottleneck by orchestrating hardware-efficient strategies:
-- **Fast K-mer Extraction:** We leverage `KMC` (K-mer Counter) for highly compressed, distributed counting of 21-mers, allowing for linear scaling and minimal memory overhead.
-- **Out-of-Core Learning:** By implementing dynamic stratified chunking and storing intermediate data in highly compressed `.npz` structures, the pipeline effortlessly handles datasets that exceed available RAM capacity.
-- **Memory-Efficient Processing:** Model training utilizes iterative data loading via `XGBoost DMatrix`, supporting training over matrices of **48+ million features** seamlessly on standard consumer hardware (e.g., standard M4 Pro architecture).
+**1. Computer science / informatics**
+- **K-mer extraction** with `KMC` (canonical 21-mers, compressed binary DBs).
+- **Out-of-core learning:** dynamic stratified chunking + compressed `.npz`
+  sparse matrices; training streams chunks via `XGBoost DMatrix`, so matrices
+  far larger than RAM are handled on a laptop.
 
-### 2. The Mathematics
-To maximize predictive reliability in a clinical context, the optimization algorithms have been heavily fine-tuned:
-- **Bayesian Hyperparameter Optimization:** `Optuna` is integrated natively to traverse the complex loss landscape, finding optimal parameters faster while mitigating the risk of overfitting.
-- **Dynamic Classification Thresholding:** Recognizing the risks of AMR, the threshold dynamically shifts to explicitly prioritize **Clinical Sensitivity** prioritizing the minimization of False Negatives (FNs).
-- **Embedded Feature Selection:** Exploring importance via the internal **Gain** metric, the algorithms extract structural genomic features mathematically proven to govern resistance phenotypes.
+**2. Mathematics**
+- **Bayesian HPO** with `Optuna`.
+- **`colsample_bytree`** search anchored to the `1/√p` square-root heuristic
+  (see `METHODOLOGY.md`).
+- **Unbiased thresholding:** the operating threshold is derived from the
+  *training* distribution (no test-set leakage); evaluation reports bootstrap
+  95% confidence intervals.
 
-### 3. The Biology
-The ultimate goal of the framework is automated biological mechanism discovery and robust Genotype-Phenotype mapping:
-- **Reverse Translating Models to Biology:** Extracted high-impact mathematical features (the top 21-mers) are translated directly into biological significance.
-- **Automated Nextflow Discovery:** Using `08_blast_pipeline.nf`, we automate queries against the local **CARD** database and the remote **NCBI `nt`** repository.
-- **Reference-Free Discovery:** The framework has successfully and autonomously rediscovered established resistance mechanisms entirely from scratch without aligning to any existing reference. Notable rediscoveries include *gyrA* QRDR mutations, *OXA-909* plasmids, and *msbA* efflux pumps. 
-
----
-
-## Project Architecture
-The project strictly complies with the **Cookiecutter Data Science** standard to enforce reproducibility and structural consistency across the repository. 
-
-Key Data Streams:
-- `data/raw/`: Immutable raw genomes (`.fna`).
-- `data/external/`: Metadata and third-party BLAST databases.
-- `data/interim/`: Intermediate representations, global KMC indices.
-- `data/processed/`: Final, canonical matrices prepared for model injection.
-- `results/`: Centralised analysis outputs and visualizations (replaces `analysis_results/`).
-
-**Dynamic Multiprocessing via Config:**
-The framework utilizes `config/config.yaml` to govern variable generation. By isolating file path structures dynamically based on the target `{antibiotic}` flag, users can launch fully parallel, multi-antibiotic runs without data collision.
-
-**MLOps & Reproducibility:**
-- **MLOps Model Versioning:** Implements safe, timestamped backup copies of Optuna studies and XGBoost models to prevent accidental overwriting and guarantee model provenance.
-- **Publication-Ready Plot Data:** All visualization pipelines automatically export the underlying raw numerical data as `.csv` files alongside `.png` plots, enabling seamless recreation of figures in third-party software (e.g., GraphPad Prism).
+**3. Biology**
+- **Reference-free discovery:** top k-mers are BLASTed against **CARD** (local)
+  and **NCBI nt** (remote) via Nextflow, then graded into
+  confirmed / candidate / weak confidence tiers.
 
 ---
 
-## Pipeline Workflow
+## Repository structure
 
-The complete end-to-end execution is governed by a sequence of highly modular analytical scripts:
+```
+ML_AMR_Prediction_v2/
+├── config/
+│   ├── config.yaml              # global config (paths, params, organism slug)
+│   ├── registry/                # single source of truth
+│   │   ├── organisms.yaml        #   organism → data paths + antibiotic set
+│   │   └── antibiotics.yaml      #   antibiotic → class mapping
+│   └── experiments/{organism}/config_{antibiotic}.yaml  # auto-generated by step 04 (split + best params)
+├── scripts/
+│   ├── 01..09_*.py              # the numbered pipeline steps
+│   ├── 08_blast_pipeline.nf     # Nextflow BLAST workflow (step 08)
+│   ├── lib/                     # shared package (no duplicated code)
+│   │   ├── config.py            #   load_config + resolve_path (organism-aware)
+│   │   ├── registry.py          #   organisms/antibiotics access
+│   │   ├── chunking.py          #   get_y_chunk
+│   │   ├── io_utils.py          #   run_command (shlex, never shell=True)
+│   │   └── run_metadata.py      #   git hash / versions / run_id capture
+│   ├── constants.py, utils.py   # thin backward-compat shims -> lib/
+│   └── migrate_to_organism_layout.py  # reversible data-layout migration
+├── tests/                       # pytest suite (smoke / unit / integration)
+├── docs/
+│   ├── TECHNICAL_REVIEW.md      # consolidated review + remediation record
+│   ├── SCALE_MLOPS_PLAN.md      # multi-organism + KB + MLOps plan
+│   └── ROADMAP.md               # thesis roadmap
+├── data/                        # raw genomes, metadata, CARD DB, matrices
+├── models/  results/  logs/  runs/   # generated (results/logs/runs gitignored)
+├── config files: requirements.txt, environment.yml, pytest.ini
+└── README.md, QUICKSTART.md, METHODOLOGY.md
+```
+
+### Data layout (organism-scoped)
+
+Paths are resolved through `scripts/lib/config.py:resolve_path()` from the
+`{organism}` templates in `config.yaml`:
+
+- `data/raw/{organism}/genomes/` — immutable `.fna` assemblies
+- `data/external/{organism}/metadata/amr_phenotypes.csv` — phenotype labels
+- `data/external/blast_db/card_nt/` — CARD BLAST DB (shared)
+- `data/interim/{organism}/kmc_outputs/` — KMC binary DBs
+- `data/processed/{organism}/{antibiotic}/matrix/` — `.npz` chunks, `y_*.csv`
+- `models/{organism}/{antibiotic}/` — model + `manifest.json`
+- `results/{organism}/{antibiotic}/` — plots + metric CSVs *(generated)*
+- `runs/{organism}/{antibiotic}/{run_id}/` — run metadata + metrics *(generated)*
+
+> **Generated outputs** (`results/`, `logs/`, `runs/`, models, `.npz`, large
+> `features.txt`) are **not version-controlled** — they are reproduced by
+> running the pipeline.
+
+---
+
+## Pipeline workflow
 
 | Step | Script | Description |
 | :--- | :--- | :--- |
-| **01** | `01_data_validation.py` / `01b_data_validation.py` | Validates initial metadata consistency and prepares genome manifests. |
-| **02** | `02_kmer_extraction.py` / `02b_global_qc_analysis.py` | Employs KMC to extract raw k-mers and plot global distribution metrics. |
-| **03** | `03_matrix_construction.py` / `03b_matrix_validation_qc.py` | Transforms strings into sparse frequency matrices and flags QC outliers. |
-| **04** | `04_optimization.py` | Performs `Optuna` Bayesian Hyperparameter Optimization. |
-| **05** | `05_model_training.py` | Invokes the Out-of-Core XGBoost trainer on the generated `.npz` chunking. |
-| **06** | `06_evaluation.py` | Evaluates accuracy, clinical sensitivity, ROC/PR curves, and dynamic limits. |
-| **07** | `07_explainability.py` | Leverages model **Gain** to unpack the highest impact genomic 21-mers. |
-| **08** | `08_blast_annotation.py` / `08_blast_pipeline.nf` | Annotates highest impact variables against the local CARD & NCBI databases. |
-| **09** | `09_biological_summary.py` | Distills raw BLAST TSVs into a human-readable, publication-ready Markdown report. |
+| 01 | `01_data_validation.py` / `01b_…` | Validate metadata, class balance, EDA plots |
+| 02 | `02_kmer_extraction.py` / `02b_…` | KMC k-mer counting + global QC |
+| 03 | `03_matrix_construction.py` / `03b_…` | Sparse binary k-mer matrices + matrix QC |
+| 03u | `03u_unitig_matrix.py` | Unitig (unitig-caller) presence/absence matrix — same chunk contract, `matrix_unitig/` (ROADMAP §0 M12) |
+| 04 | `04_optimization.py` | Optuna Bayesian HPO → `config_{antibiotic}.yaml` + run metadata |
+| 05 | `05_model_training.py` | Full-data XGBoost boosting over a streaming `QuantileDMatrix` → model + `manifest.json` |
+| 06 | `06_evaluation.py` | Metrics, ROC/PR, calibration, bootstrap CIs |
+| 07 | `07_explainability.py` | Gain-based top k-mers → CSV + FASTA |
+| 08 | `08_blast_annotation.py` / `.nf` | BLAST top k-mers vs CARD + NCBI (Nextflow) |
+| 09 | `09_biological_summary.py` | Confidence-tiered biological report (Markdown) |
 
 ---
 
-## Case Study: Ciprofloxacin Validation
-Currently run against a standard benchmark of Ciprofloxacin resistance, our zero-alignment, feature-extracted methodology successfully yields state-of-the-art predictive performance:
-- **Accuracy:** 96.8%
-- **Clinical Sensitivity:** 97.2%
-- **ROC-AUC:** 0.99
+## Results (E. coli, unitig features, 3 antibiotics)
 
-This establishes a profound proof-of-concept validation of the Out-of-Core framework logic to scale toward other targets rapidly.
+**Lineage-aware cross-validation** ROC-AUC (PopPUNK + StratifiedGroupKFold — the
+honest, non-inflated estimate; an entire lineage stays on one CV side) alongside
+the single-split test AUC. The KB currently holds three antibiotics spanning the
+two AMR mechanism classes (acquired gene vs target-SNP).
+
+| Antibiotic | Mechanism (confirmed) | Lineage-CV ROC-AUC | Single-split AUC |
+| :--- | :--- | :--- | :--- |
+| Ampicillin | acquired gene — *TEM* β-lactamase | 0.951 ± 0.011 | 0.924 |
+| Cefotaxime | acquired gene — *CTX-M* / *CMY* ESBL/AmpC | 0.955 ± 0.020 | 0.969 |
+| Ciprofloxacin | target-gene SNP — *gyrA* S83L + *parC* S80I | 0.950 ± 0.007 | 0.980 |
+
+Validation done (see `docs/ROADMAP.md` / `python scripts/kb_report.py`):
+lineage-aware CV (M2), CPSS stability selection + PFER bound (M4), permutation
+tests (M9), pyseer LMM population-structure-corrected significance (M14), CARD
+variant-model SNP allele check (M11), genome QC (CheckM2 + QUAST, 97.1% pass, M15),
+and **external validation** — AMRFinderPlus/ResFinder concordance + a leakage-free
+model-vs-tool head-to-head on held-out genomes (M13), where the unitig model
+matches ResFinder and beats AMRFinderPlus for ciprofloxacin. Remaining: Zenodo
+DOI (M10) and an optional temporal/geographic hold-out.
 
 ---
 
-## Installation & Quickstart
+## Installation
 
-### Dependencies
-Before spinning up the framework locally, ensure you have the core suite of command line dependencies natively installed.
-- **Python:** `3.9+`
-- **KMC (K-mer Counter):** Used for genomic k-mer mining.
-- **BLAST+:** Mandatory for sequence homology queries.
-- **Nextflow:** Required to launch the `08_blast_pipeline.nf` workflow.
-- **Hardware Profile:** Tested successfully on an Apple M4 Pro (24GB RAM). The out-of-core DMatrix chunking mechanism allows processing of 48M+ features on standard local workstations without requiring high-performance computing (HPC) clusters.
+**Python:** 3.10+. External tools (KMC, BLAST+, Nextflow) are not pip-installable
+— the conda route below installs everything in one step.
 
-### Quickstart Execution
-1. **Clone & Standardize:**
-   ```bash
-   git clone <repository_url>
-   cd ML_AMR_Prediction_v2
-   pip install -r requirements.txt
-   ```
-2. **Execute sequential processing** (Modify `config.yaml` to specify the target antibiotic path as required):
-   ```bash
-   python scripts/01_data_validation.py
-   python scripts/02_kmer_extraction.py
-   python scripts/03_matrix_construction.py
-   python scripts/04_optimization.py
-   python scripts/05_model_training.py
-   python scripts/06_evaluation.py
-   python scripts/07_explainability.py
-   python scripts/08_blast_annotation.py
-   python scripts/09_biological_summary.py
-   ```
+### Option A — conda (recommended; includes KMC/BLAST/Nextflow)
+
+```bash
+conda env create -f environment.yml
+conda activate amr-prediction
+```
+
+### Option B — pip (Python deps only; install tools separately)
+
+```bash
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+Then install the external tools (conda recommended: `conda env create -f environment.yml`
+installs them all): KMC ≥3.2, BLAST+ ≥2.12, Nextflow ≥22.10. Tools are found on
+`PATH` (conda/module); a macOS binary under `bin/bin/` is used only as a fallback.
+
+---
+
+## Quickstart
+
+```bash
+# 1) choose target in config/config.yaml (project.organism + project.target_antibiotic)
+# 2) acquire data, then run the steps in order
+python scripts/00a_download_bvbrc.py --organism ecoli   # BV-BRC AMR data + assemblies
+python scripts/00_prepare_metadata.py --organism ecoli  # binary phenotype matrix
+python scripts/01_data_validation.py
+python scripts/02_kmer_extraction.py
+python scripts/02b_global_qc_analysis.py
+python scripts/03_matrix_construction.py
+python scripts/04_optimization.py
+python scripts/05_model_training.py
+python scripts/06_evaluation.py
+python scripts/07b_feature_stability.py   # 5-seed stability (run before 07)
+python scripts/07_explainability.py       # gain top-N ∪ stable set -> CSV + FASTA
+python scripts/08_blast_annotation.py     # needs BLAST+ / Nextflow / CARD DB
+python scripts/09_biological_summary.py   # tiered report; set ncbi.entrez_email or AMR_ENTREZ_EMAIL
+python scripts/10_kmer_background_frequency.py  # resistant-vs-susceptible discriminativeness
+python scripts/11_variant_snp_check.py    # CARD variant-model SNP allele check (optional)
+python scripts/12_permutation_test.py     # M9: MDA permutation importance (+ BH-FDR)
+python scripts/12b_label_permutation_test.py  # M9: label-permutation null (model significance)
+python scripts/13_stability_selection.py  # M4: CPSS stability selection (PFER bound) + TreeSHAP
+python scripts/13b_stable_annotation.py   # M4: CARD-annotate the stable set (tier + ARO)
+python scripts/14_pyseer_lmm.py --mode prep   # M14: pyseer LMM (population-structure-corrected); pyseer CLIs run via amr-tools.sif
+python scripts/populate_database.py --antibiotic <ab>   # M8: load everything -> results/{org}/kb/amrk.db (multi-antibiotic, unitig schema 0.4.0)
+streamlit run scripts/kb_app.py           # local queryable KB explorer (pip install streamlit pandas)
+uvicorn scripts.kb_api:app                # REST API (S8/S9): /api/v1/{kmers,kmers/{seq},overlap,stats,metadata} + /docs
+```
+
+**Querying the KB via the REST API** (`scripts/kb_api.py`, FastAPI):
+
+```bash
+pip install fastapi uvicorn
+AMR_KB_DB=results/ecoli/kb/amrk.db uvicorn scripts.kb_api:app   # http://localhost:8000/docs
+# GET /api/v1/kmers?antibiotic=cefotaxime&tier=confirmed&stable_only=true
+# GET /api/v1/kmers/{sequence}     GET /api/v1/overlap?ab1=ampicillin&ab2=cefotaxime
+# GET /api/v1/stats                GET /api/v1/metadata   (FAIR: schema ver, DOI, license)
+```
+
+> **Feature unit = unitig** (compacted de Bruijn graph; ROADMAP §0). The pipeline
+> runs per antibiotic (set `project.target_antibiotic` in `config.yaml`); the KB
+> is organism-level and multi-antibiotic. Each run is reproducible — `pipeline_runs`
+> stamps the git commit, seed, config hash and CARD version.
+
+See `QUICKSTART.md` for prerequisites, HPC notes and expected outputs.
+
+## Testing
+
+A layered suite lets you validate changes in seconds instead of rerunning the
+multi-day pipeline (see `tests/README.md`):
+
+```bash
+pytest                 # fast: smoke + unit (seconds); never touches config
+pytest -m integration  # opt-in end-to-end on a tiny synthetic dataset (minutes)
+```
+
+## Orchestration & developer workflow
+
+```bash
+make help                          # list all targets
+make dev-install                   # install the QA toolchain (ruff/mypy/pre-commit) + pre-commit hooks
+make lint                          # ruff
+make test                          # unit + smoke
+python scripts/run_pipeline.py --list                         # show the step plan
+python scripts/run_pipeline.py --organism ecoli --antibiotic ampicillin   # run the analysis core 01->10
+```
+
+CI (GitHub Actions, `.github/workflows/ci.yml`) runs ruff + the unit/smoke suite on Python 3.10–3.12.
+
+## Reproducibility & data
+
+The repository tracks **only code, configuration, docs, and the small CARD
+homolog BLAST DB**. All datasets, k-mer matrices, models, results and run
+metadata are *generated* and reproduced by running the pipeline (see
+`QUICKSTART.md`). Each run records its git commit, library versions and seed in
+`runs/.../run_metadata.json`. Genome data is obtained from
+[BV-BRC](https://www.bv-brc.org); resistance annotations from
+[CARD](https://card.mcmaster.ca).
+
+## License & citation
+
+The **software** is released under the [MIT License](LICENSE). If you use it,
+please cite it via [`CITATION.cff`](CITATION.cff). Contributions are welcome — see
+[`CONTRIBUTING.md`](CONTRIBUTING.md) and [`CHANGELOG.md`](CHANGELOG.md).
+
+## Data availability & KB versioning (FAIR)
+
+The **AMRK-DB knowledge base** (`results/{organism}/kb/amrk.db`) is released under
+**CC-BY-4.0** (distinct from the MIT-licensed code) and versioned with a semantic
+`kb_schema_version` (currently **0.4.0**, stamped in the `kb_metadata` table).
+Every KB record links to a `pipeline_runs` row carrying the git commit, random
+seed, config hash and CARD version, so any biomarker is reproducible.
+
+Each release is archived on **Zenodo** with a persistent DOI (concept DOI resolves
+to the latest version; each version also gets its own DOI). The DOI is stored in
+`kb_metadata.zenodo_doi` and mirrored in [`CITATION.cff`](CITATION.cff) /
+[`.zenodo.json`](.zenodo.json).
+
+> **Zenodo DOI:** _reserved — added on first deposit_ (see
+> [`docs/RELEASE_ZENODO.md`](docs/RELEASE_ZENODO.md)).
+
+Raw genome assemblies come from [BV-BRC](https://www.bv-brc.org); resistance
+gene annotations from [CARD](https://card.mcmaster.ca) (v4.0.1). The pipeline
+regenerates the unitig matrices from the BV-BRC assemblies, so the FAIR deposit
+ships the KB + evidence tables + run metadata rather than the large raw matrices.
