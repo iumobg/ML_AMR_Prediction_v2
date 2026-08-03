@@ -8,8 +8,8 @@ Run kb_tables.py FIRST, then:
     python scripts/kb_figures.py --tables results/tables --results results \
         --out figures [--only performance,cpss_pfer,cross_org,mechanism,null_hist]
 
-Each figure is saved as PNG (200 dpi) + PDF. Colours: E. coli blue, K. pneumoniae
-red (+ a 3rd colour auto-assigned for any further organism). Edit CLASS_ORDER /
+Each figure is saved as PNG (200 dpi) + PDF. Colours come from PALETTE (registry slugs); any organism not listed there gets an
+auto-assigned colour, and display names come from the registry. Edit CLASS_ORDER /
 palette below to taste — this is a scaffold you own, not a black box.
 """
 import argparse
@@ -23,14 +23,19 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
 CLASS_ORDER = ["penicillins", "cephalosporins", "beta_lactams_carbapenems_others",
                "quinolones", "aminoglycosides", "tetracyclines",
                "folate_pathway_inhibitors"]
+# Keys are REGISTRY SLUGS (organisms.yaml / pipeline_runs.organism). They used to be
+# short forms ("saureus", "paeruginosa") that never matched the real slugs, so four of
+# the six organisms silently fell through to the auto-assigned _EXTRA colours.
 PALETTE = {"ecoli": "#2c7fb8", "kpneumoniae": "#de2d26",
-           "paeruginosa": "#31a354", "saureus": "#756bb1"}
-_EXTRA = ["#e6ab02", "#a6761d", "#666666"]
+           "staphylococcus_aureus": "#756bb1", "acinetobacter_baumannii": "#e6ab02",
+           "pseudomonas_aeruginosa": "#31a354", "enterococcus_faecium": "#a6761d"}
+_EXTRA = ["#666666", "#1b9e77", "#d95f02"]
 
 # The 7 orthogonal validation layers (evidence_type in the KB) in pipeline order,
 # biological → statistical. Label used on the evidence-layer heatmap (fig 06).
@@ -55,19 +60,55 @@ def _short(ab):
     return ab.replace("_", "/")[:18]
 
 
+def _display(org, _cache={}):
+    """'Escherichia coli' for a slug — from the registry, never hardcoded, so the
+    figures follow the panel instead of naming two organisms forever."""
+    if org not in _cache:
+        name = org
+        try:
+            from lib.registry import get_organism
+            name = (get_organism(org) or {}).get("display_name") or org
+        except Exception:
+            name = {"ecoli": "Escherichia coli",
+                    "kpneumoniae": "Klebsiella pneumoniae"}.get(org, org.replace("_", " ").title())
+        _cache[org] = name
+    return _cache[org]
+
+
 def _abbr(org):
-    return {"ecoli": "Ec", "kpneumoniae": "Kp", "paeruginosa": "Pa", "saureus": "Sa"}.get(org, org[:2].title())
+    """'Ec' from 'Escherichia coli' — genus+species initials of the display name."""
+    parts = _display(org).split()
+    if len(parts) >= 2:
+        return parts[0][0].upper() + parts[1][0].lower()
+    return org[:2].title()
+
+
+def _class_order(series):
+    """Drug classes present in the data: the curated CLASS_ORDER first, then anything
+    else alphabetically. CLASS_ORDER lists 7 classes while the panel now spans 14, and
+    filtering *to* it silently dropped half the classes from the overview figure —
+    a figure must never quietly narrow the KB it claims to summarise."""
+    present = set(str(c) for c in series.dropna())
+    known = [c for c in CLASS_ORDER if c in present]
+    return known + sorted(present - set(known))
 
 
 def _sortkey(df):
     df = df.copy()
-    df["_c"] = df["drug_class"].map({c: i for i, c in enumerate(CLASS_ORDER)}).fillna(99)
+    df["_c"] = df["drug_class"].map({c: i for i, c in enumerate(_class_order(df["drug_class"]))}).fillna(99)
     return df.sort_values(["_c", "organism", "antibiotic"])
 
 
-def _legend(ax, orgs):
-    ax.legend(handles=[Patch(color=_colour(o), label={"ecoli": "E. coli", "kpneumoniae": "K. pneumoniae"}.get(o, o))
-                       for o in orgs], fontsize=9, loc="lower left")
+def _legend(ax, orgs, outside=False):
+    """`outside=True` parks the legend right of the axes: with 45 bars a legend drawn
+    inside covers real data (it sat on top of the low-AUC bars, which are exactly the
+    ones a reader needs to see)."""
+    handles = [Patch(color=_colour(o), label=_display(o)) for o in orgs]
+    if outside:
+        ax.legend(handles=handles, fontsize=9, loc="upper left",
+                  bbox_to_anchor=(1.005, 1.0), frameon=False)
+    else:
+        ax.legend(handles=handles, fontsize=9, loc="lower left")
 
 
 def _save(fig, out, name):
@@ -86,12 +127,16 @@ def fig_performance(tables, out):
     ax.bar(x, df["lineage_cv_auc"], yerr=df["lineage_cv_std"], color=col,
            capsize=3, edgecolor="black", linewidth=0.4, alpha=0.9)
     ax.axhline(0.5, ls="--", c="grey", lw=0.8)
-    ax.set_ylim(0.4, 1.0)
+    ax.text(0.3, 0.505, "chance", fontsize=8, color="grey", va="bottom", ha="left")
+    # Floor below the weakest model (0.429 for A. baumannii ceftazidime): a 0.4 floor
+    # clipped that bar to an invisible sliver, hiding the panel's most informative
+    # result — the clonally-confounded model lineage-CV is supposed to expose.
+    ax.set_ylim(min(0.40, float(df["lineage_cv_auc"].min()) - 0.06), 1.02)
     ax.set_xticks(x)
     ax.set_xticklabels([f"{_short(a)}\n({_abbr(o)})" for a, o in zip(df.antibiotic, df.organism)], rotation=90, fontsize=7.5)
     ax.set_ylabel("Lineage-aware CV ROC-AUC (mean ± SD)")
     ax.set_title("Per-antibiotic generalisation performance")
-    _legend(ax, df["organism"].unique())
+    _legend(ax, df["organism"].unique(), outside=True)
     _save(fig, out, "01_performance_lineageCV")
 
 
@@ -109,7 +154,7 @@ def fig_cpss_pfer(tables, out):
     a2.set_ylabel("PFER bound (E[false positives], log)")
     a2.set_xticks(x)
     a2.set_xticklabels([f"{_short(a)} ({_abbr(o)})" for a, o in zip(df.antibiotic, df.organism)], rotation=90, fontsize=7.5)
-    _legend(a1, df["organism"].unique())
+    _legend(a1, df["organism"].unique(), outside=True)
     _save(fig, out, "02_cpss_pfer")
 
 
@@ -118,10 +163,21 @@ _FAM_MAP = {
     "General Bacterial Porin with reduced permeability to beta-lactams": "porin loss",
     "aminoglycoside bifunctional resistance protein": "AAC(6')-APH",
     "major facilitator superfamily (MFS) antibiotic efflux pump": "MFS efflux",
+    "resistance-nodulation-cell division (RND) antibiotic efflux pump": "RND efflux",
+    "ATP-binding cassette (ABC) antibiotic efflux pump": "ABC efflux",
+    "small multidrug resistance (SMR) antibiotic efflux pump": "SMR efflux",
     "OXA beta-lactamase;OXA-48-like beta-lactamase": "OXA-48-like",
     "sulfonamide resistant sul": "sul",
     "trimethoprim resistant dihydrofolate reductase dfr": "dfr",
 }
+
+
+# Last words that carry no information on their own. Taking the final token of an ARO
+# family name is a decent shortener ("...APH(3')" -> "APH(3')"), but for families that
+# end in a generic noun it produced labels like "protein" and "pump" on the figures —
+# unreadable, and indistinguishable between families.
+_GENERIC_TAIL = {"protein", "proteins", "pump", "pumps", "enzyme", "gene", "genes",
+                 "family", "system", "transporter", "determinant", "cluster"}
 
 
 def _fam(s):
@@ -131,7 +187,17 @@ def _fam(s):
         return _FAM_MAP[s]
     if "beta-lactamase" in s:
         return s.replace(" beta-lactamase", "").strip()
-    return s.split()[-1] if s else s
+    if not s:
+        return s
+    parts = s.split()
+    if parts[-1].lower() in _GENERIC_TAIL:
+        # Drop the trailing generic words, then keep the two that identify the family:
+        #   "tetracycline-resistant ribosomal protection protein" -> "ribosomal protection"
+        #   "glycopeptide resistance gene cluster"                -> "glycopeptide resistance"
+        while parts and parts[-1].lower() in _GENERIC_TAIL:
+            parts.pop()
+        return " ".join(parts[-2:]) if parts else s
+    return parts[-1]
 
 
 CLASS_SHORT = {"beta_lactams_carbapenems_others": "carbapenems / others",
@@ -142,14 +208,14 @@ def fig_overview(tables, out, db):
     """Cover slide: scope of the KB (models / organisms / classes / genomes) +
     models-per-drug-class stacked by organism."""
     ms = pd.read_csv(tables / "models_summary.csv")
-    order = [c for c in CLASS_ORDER if c in set(ms.drug_class)]
+    order = _class_order(ms.drug_class)
     orgs = list(ms.organism.unique())
     fig = plt.figure(figsize=(13, 4.8))
     gs = fig.add_gridspec(1, 2, width_ratios=[0.85, 1.7], wspace=0.28)
     a0 = fig.add_subplot(gs[0]); a1 = fig.add_subplot(gs[1])
     a0.axis("off")
     cards = [(str(len(ms)), "AMR models"),
-             (str(ms.organism.nunique()), "organisms  (E. coli, K. pneumoniae)"),
+             (str(ms.organism.nunique()), "ESKAPEE organisms"),
              (str(len(order)), "drug classes"),
              (f"{int(ms.n_genomes.sum()):,}", "genome–phenotype pairs")]
     for k, (num, lab) in enumerate(cards):
@@ -162,7 +228,7 @@ def fig_overview(tables, out, db):
     for org in orgs:
         vals = piv[org].values if org in piv.columns else np.zeros(len(order))
         a1.barh(y, vals, left=left, color=_colour(org), edgecolor="white",
-                label={"ecoli": "E. coli", "kpneumoniae": "K. pneumoniae"}.get(org, org))
+                label=_display(org))
         left += vals
     a1.set_yticks(y); a1.set_yticklabels([CLASS_SHORT.get(c, c.replace("_", " ")) for c in order], fontsize=9.5)
     a1.invert_yaxis(); a1.set_xlabel("models"); a1.legend(fontsize=9, loc="lower right")
@@ -178,22 +244,36 @@ def fig_cross_org(tables, out):
     if not abs_:
         print("  (cross_org: no drug shared across organisms yet — skipped)")
         return
-    fig, ax = plt.subplots(figsize=(11, 1.0 + 1.0 * len(abs_)))
+    fig, ax = plt.subplots(figsize=(13, 1.0 + 1.0 * len(abs_)))
     ax.axis("off")
     for i, ab in enumerate(abs_):
         yy = len(abs_) - 1 - i
         sub = ot[ot.antibiotic == ab]
-        fam = {o: set(_fam(x) for x in g["aro_gene_family"].dropna()) for o, g in sub.groupby("organism")}
-        ec, kp = fam.get("ecoli", set()), fam.get("kpneumoniae", set())
-        shared = sorted(ec & kp); eo = sorted(ec - kp); ko = sorted(kp - ec)
+        # {gene family -> organisms that recovered it}. This used to intersect two
+        # hardcoded organisms (ecoli/kpneumoniae) and label everything else "-only",
+        # which silently ignored the other four organisms of the panel: a drug like
+        # ciprofloxacin is assayed in five.
+        fam_orgs = {}
+        for o, g in sub.groupby("organism"):
+            for f in {_fam(x) for x in g["aro_gene_family"].dropna()}:
+                fam_orgs.setdefault(f, set()).add(o)
+        shared = sorted((f for f, o in fam_orgs.items() if len(o) >= 2),
+                        key=lambda f: (-len(fam_orgs[f]), f))
+        single = sorted((f for f, o in fam_orgs.items() if len(o) == 1), key=str)
         ax.text(0.0, yy, _short(ab), fontsize=12, fontweight="bold", va="center")
-        ax.text(0.24, yy, "   ".join(shared) or "—", fontsize=13, fontweight="bold",
-                color="#2ca25f", va="center")
-        extra = []
-        if eo: extra.append("Ec-only: " + ", ".join(eo))
-        if ko: extra.append("Kp-only: " + ", ".join(ko))
-        ax.text(0.24, yy - 0.30, "     ".join(extra), fontsize=8.5, color="#888", va="center")
-    ax.text(0.24, len(abs_) - 0.30, "SHARED gene family — recovered in BOTH organisms (concordant)",
+        txt = "   ".join(f"{f} ({','.join(sorted(_abbr(o) for o in fam_orgs[f]))})"
+                         for f in shared) or "—"
+        ax.text(0.26, yy, txt, fontsize=12, fontweight="bold", color="#2ca25f", va="center")
+        if single:
+            per = ", ".join(f"{_abbr(next(iter(fam_orgs[f])))}: {f}" for f in single[:6])
+            if len(single) > 6:
+                per += f", +{len(single) - 6} more"
+            ax.text(0.26, yy - 0.30, "single-organism — " + per,
+                    fontsize=8.5, color="#888", va="center")
+    n_org = ot.groupby("antibiotic")["organism"].nunique().reindex(abs_)
+    ax.text(0.26, len(abs_) - 0.30,
+            f"SHARED gene family — recovered in ≥2 organisms (concordant); "
+            f"drugs span up to {int(n_org.max())} organisms",
             fontsize=9.5, color="#2ca25f", fontweight="bold", va="center")
     ax.set_xlim(-0.02, 1.0); ax.set_ylim(-0.6, len(abs_) - 0.05)
     ax.set_title("Cross-organism concordance: same drug → same resistance gene family", fontsize=12.5)
@@ -301,9 +381,14 @@ def fig_evidence_layers(tables, out, db):
 
 
 def fig_significance(tables, out, db):
-    """05 redesign — single panel: REAL lineage-CV AUC vs label-shuffle null_max
-    per model (parsed from the KB's label_permutation evidence_source). Shows the
-    gap = model-level significance, far clearer than 20 tiny histograms."""
+    """05 — model-level significance: the observed AUC of step 12b's label-permutation
+    test vs its shuffled-label null, per model.
+
+    The observed value is 12b's OWN split AUC, NOT the lineage-CV score: the two differ
+    sharply exactly where it matters (A. baumannii ceftazidime is 0.91 here and 0.429
+    under lineage-CV). This figure used to call it 'REAL lineage-CV AUC', which invited
+    the reader to conclude that a clonally-confounded model generalises. The lineage-CV
+    value is now drawn as a separate black tick so both are visible and distinct."""
     import re, sqlite3
     ms = _sortkey(pd.read_csv(tables / "models_summary.csv")).reset_index(drop=True)
     conn = sqlite3.connect(str(db))
@@ -320,18 +405,26 @@ def fig_significance(tables, out, db):
     r = [real[i] for i in ms["run_id"]]
     nm = [nullmax[i] for i in ms["run_id"]]
     col = [_colour(o) for o in ms["organism"]]
-    fig, ax = plt.subplots(figsize=(9, 0.42 * len(ms) + 1.2))
-    for yi, ri, ni, ci in zip(y, r, nm, col):
+    lcv = list(ms["lineage_cv_auc"])
+    fig, ax = plt.subplots(figsize=(9.5, 0.42 * len(ms) + 1.4))
+    for yi, ri, ni, ci, li in zip(y, r, nm, col, lcv):
         ax.plot([ni, ri], [yi, yi], color="lightgrey", lw=2, zorder=1)
         ax.scatter(ni, yi, color="#999999", s=28, zorder=2)
         ax.scatter(ri, yi, color=ci, s=46, zorder=3)
+        ax.scatter(li, yi, marker="|", color="black", s=90, linewidths=1.4, zorder=4)
     ax.axvline(0.5, ls="--", c="grey", lw=0.8)
     ax.set_yticks(y)
     ax.set_yticklabels([f"{_short(a)} ({_abbr(o)})" for a, o in zip(ms.antibiotic, ms.organism)], fontsize=7.5)
-    ax.set_xlim(0.4, 1.0)
+    ax.set_xlim(min(0.4, float(min(lcv)) - 0.03), 1.0)
     ax.set_xlabel("ROC-AUC")
-    ax.set_title("Model-level significance: REAL lineage-CV AUC (colour) ≫ "
-                 "label-shuffle null max (grey)\nall p ≈ 0.02 (N=50 permutations)", fontsize=10)
+    ax.set_title("Model-level significance: observed AUC (colour) ≫ label-shuffle null max (grey)\n"
+                 "black tick = lineage-aware CV AUC (the reported, generalisation metric)\n"
+                 "all p ≈ 0.02 (N=50 permutations)", fontsize=10)
+    ax.legend(handles=[
+        Line2D([], [], marker="o", ls="", color="#444444", label="observed AUC (12b split)"),
+        Line2D([], [], marker="o", ls="", color="#999999", label="label-shuffle null max"),
+        Line2D([], [], marker="|", ls="", color="black", markeredgewidth=1.4, label="lineage-CV AUC"),
+    ], fontsize=8, loc="lower left", frameon=False)
     ax.invert_yaxis()
     _save(fig, out, "05_significance_real_vs_null")
 

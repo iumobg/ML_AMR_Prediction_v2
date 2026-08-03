@@ -119,14 +119,51 @@ def main():
     bio = []
     q = """
       SELECT s.model_id, s.unitig_id, u.sequence, s.gain, s.mean_abs_shap,
-             s.selection_frequency, s.stable, s.composite_score,
-             b.gene_symbol, b.tier, b.identity_pct, b.coverage, b.aro_accession,
+             s.selection_frequency, s.stable, s.composite_score, s.selection_method,
+             b.gene_symbol, b.tier, b.source_db, b.identity_pct, b.coverage, b.aro_accession,
              b.aro_gene_family, b.aro_drug_class, b.aro_resistance_mechanism,
-             f.prevalence_resistant, f.prevalence_susceptible, f.delta_prevalence,
+             f.prevalence_resistant, f.prevalence_susceptible,
+             -- Derive the gap when the KB has none: step 10 did not emit
+             -- delta_prevalence before 2026-08, so every KB written earlier stores NULL
+             -- even though both prevalences are there.
+             COALESCE(f.delta_prevalence,
+                      f.prevalence_resistant - f.prevalence_susceptible) AS delta_prevalence,
              f.odds_ratio, f.fisher_p, f.discriminative,
              et.evidence_tier, et.n_evidence_layers, et.evidence_layers, et.is_novel_candidate
-      FROM unitig_model_scores s
-      LEFT JOIN blast_annotations b ON b.unitig_id=s.unitig_id AND b.model_id=s.model_id
+      FROM (
+          -- One row per (unitig, model). unitig_model_scores is keyed on
+          -- (unitig_id, model_id, selection_method), so a biomarker found by BOTH the
+          -- gain path (07/07b) and CPSS (13) legitimately has two rows — but a table
+          -- of biomarkers must list it once, or it is counted twice everywhere. The
+          -- two rows populate disjoint columns (gain/in_gain_topn vs
+          -- selection_frequency/stable/mean_abs_shap/composite_score), so MAX() merges
+          -- them without losing anything, and selection_method records both.
+          SELECT unitig_id, model_id,
+                 MAX(gain)                AS gain,
+                 MAX(in_gain_topn)        AS in_gain_topn,
+                 MAX(selection_frequency) AS selection_frequency,
+                 MAX(stable)              AS stable,
+                 MAX(composite_score)     AS composite_score,
+                 MAX(mean_abs_shap)       AS mean_abs_shap,
+                 GROUP_CONCAT(DISTINCT selection_method) AS selection_method
+          FROM unitig_model_scores GROUP BY unitig_id, model_id
+      ) s
+      LEFT JOIN (
+          -- ONE BLAST row per (unitig, model). A unitig can carry both a CARD and an
+          -- NCBI hit, and joining the raw table multiplied those biomarkers into
+          -- several rows: biomarkers.csv came out at 3693 rows for 3571 biomarkers and
+          -- every tier count was inflated (strong_novel read 88 instead of the KB's 23).
+          -- Best hit = CARD first (gene_symbol/tier/ARO come from there), then higher
+          -- identity, then lower e-value.
+          SELECT * FROM (
+              SELECT *, ROW_NUMBER() OVER (
+                         PARTITION BY unitig_id, model_id
+                         ORDER BY (source_db='card') DESC,
+                                  COALESCE(identity_pct, -1) DESC,
+                                  COALESCE(evalue, 1e9) ASC) AS _rn
+              FROM blast_annotations
+          ) WHERE _rn = 1
+      ) b ON b.unitig_id=s.unitig_id AND b.model_id=s.model_id
       LEFT JOIN unitig_background_frequency f ON f.unitig_id=s.unitig_id AND f.model_id=s.model_id
       LEFT JOIN unitig_evidence_tier et ON et.unitig_id=s.unitig_id AND et.model_id=s.model_id
       LEFT JOIN unitigs u ON u.unitig_id=s.unitig_id
@@ -151,11 +188,21 @@ def main():
         bio.append(d)
     bcols = ["model_id", "organism", "antibiotic", "drug_class", "unitig_id", "sequence",
              "gain", "mean_abs_shap", "selection_frequency", "stable", "composite_score",
+                 "selection_method",
              "mda_auc_drop", "pyseer_lrt_p", "prevalence_resistant", "prevalence_susceptible",
              "delta_prevalence", "odds_ratio", "fisher_p", "discriminative",
-             "gene_symbol", "tier", "identity_pct", "coverage", "aro_accession",
+             "gene_symbol", "tier", "source_db", "identity_pct", "coverage", "aro_accession",
              "aro_gene_family", "aro_drug_class", "aro_resistance_mechanism",
              "evidence_tier", "n_evidence_layers", "evidence_layers", "is_novel_candidate"]
+    # Guard: biomarkers.csv is one row per (model, unitig). A LEFT JOIN that fans out
+    # silently double-counts biomarkers in every downstream table, figure and thesis
+    # number, and nothing else would notice — so fail loudly instead.
+    _pairs = {(d["model_id"], d["unitig_id"]) for d in bio}
+    if len(_pairs) != len(bio):
+        raise SystemExit(
+            f"ERROR: biomarkers rows ({len(bio)}) != distinct (model, unitig) pairs "
+            f"({len(_pairs)}) — a join is fanning out; tier counts would be inflated."
+        )
     _write(bio, bcols, out / "biomarkers.csv")
 
     # ---- mechanisms: on-target confirmed genes (class-filtered) ------------
