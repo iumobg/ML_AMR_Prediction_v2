@@ -39,6 +39,7 @@ import csv
 import datetime
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -136,27 +137,92 @@ def _tokens(field):
     return {t.strip().upper() for t in field.replace(",", "/").split("/") if t.strip()}
 
 
+# Agents AMRFinderPlus cannot resolve, so it is not scored on them at all.
+# Without this they come out as an all-negative predictor at balanced accuracy
+# 0.500, which reads as "the tool performed at chance" when the truth is "the
+# tool was not asked", and that is unfair to the tool in a head-to-head table.
+AFP_NOT_ASSESSABLE = {
+    # AMRFinderPlus labels every van determinant `GLYCOPEPTIDE | VANCOMYCIN` and
+    # publishes no TEICOPLANIN subclass, so it cannot separate vanA (vancomycin
+    # and teicoplanin) from vanB (vancomycin only).
+    "teicoplanin",
+    # AMRFinderPlus resolves beta-lactamases but not inhibitor combinations: it
+    # publishes no SULBACTAM subclass, so it cannot say whether sulbactam
+    # restores activity against the enzymes it did find.
+    "ampicillin_sulbactam",
+    # No MONOBACTAM or AZTREONAM subclass appears anywhere in the delivered
+    # output, so aztreonam draws no call at all: 0% called against an 88.7%
+    # phenotype rate in K. pneumoniae. Scoring that as an all-negative predictor
+    # would report the tool as failing a question it was never able to answer.
+    "aztreonam",
+}
+
+
 def parse_amrfinder(tsv_path, antibiotics=DEFAULT_ANTIBIOTICS, keywords=AFP_KEYWORDS):
     """One AMRFinderPlus TSV -> {antibiotic: 0/1}. R if any AMR-type row's
-    Class/Subclass tokens intersect the antibiotic's keyword set."""
-    calls = {ab: 0 for ab in antibiotics}
+    Class/Subclass tokens intersect the antibiotic's keyword set. Agents in
+    AFP_NOT_ASSESSABLE are omitted, so downstream code reports no call rather
+    than a spurious susceptible one."""
+    calls = {ab: 0 for ab in antibiotics if ab not in AFP_NOT_ASSESSABLE}
     with open(tsv_path, encoding="utf-8") as fh:
         reader = csv.DictReader(fh, delimiter="\t")
         for row in reader:
             if (row.get("Type") or row.get("Element type") or "").strip().upper() != "AMR":
                 continue
+            # `--plus` adds elements NCBI flags as of interest -- stress response,
+            # efflux, virulence -- which are not by themselves resistance
+            # determinants. Counting them as calls inflates the tool's false
+            # positives: mepA, the chromosomal MATE pump carried by 2501 of 2505
+            # S. aureus genomes here, is a `plus` element, and taking it at face
+            # value called tetracycline in 100% of them against a 23.2%
+            # phenotype rate. Only the curated `core` set is scored.
+            if (row.get("Scope") or "core").strip().lower() != "core":
+                continue
             toks = _tokens(row.get("Class")) | _tokens(row.get("Subclass"))
-            for ab in antibiotics:
+            for ab in calls:
                 if toks & keywords.get(ab, set()):
                     calls[ab] = 1
     return calls
 
 
+# ResFinder writes antibiotic names as free text with '+' and spaces
+# ("amoxicillin+clavulanic acid"), while this project keys them with underscores
+# ("amoxicillin_clavulanic_acid"). A literal lower-case comparison therefore
+# matched neither, and every combination agent silently produced no ResFinder
+# call at all. Matching is done on the token SET so separator style stops
+# mattering, and never on a substring: "ampicillin_sulbactam" must NOT match
+# ResFinder's plain "ampicillin", because the inhibitor changes the phenotype.
+def _ab_tokens(name):
+    return frozenset(t for t in re.split(r"[^a-z0-9]+", str(name).strip().lower()) if t)
+
+
+# Combinations ResFinder reports one component at a time. It publishes no row
+# for the combination itself, so the call has to be assembled from the parts.
+# Rule: resistant if EITHER component is called resistant — a genotypic
+# convention, since a single acquired sul or dfr determinant is enough to
+# abolish the synergy the combination depends on. This is a decision taken here,
+# not something ResFinder reports, and it is stated in the thesis as such.
+RF_COMPONENTS = {
+    "trimethoprim_sulfamethoxazole": ("trimethoprim", "sulfamethoxazole"),
+}
+
+
 def parse_resfinder(pheno_table_path, antibiotics=DEFAULT_ANTIBIOTICS):
     """One ResFinder pheno_table -> {antibiotic: 0/1}. Reads the '# Antimicrobial
-    <TAB> Class <TAB> WGS-predicted phenotype …' rows directly."""
-    wanted = {ab.lower(): ab for ab in antibiotics}
-    calls = {}
+    <TAB> Class <TAB> WGS-predicted phenotype …' rows directly.
+
+    Antibiotics ResFinder does not report at all (e.g. ampicillin_sulbactam,
+    oxacillin) are simply absent from the returned dict, so downstream code
+    scores them as 'no ResFinder call' rather than as a susceptible call.
+    """
+    wanted = {_ab_tokens(ab): ab for ab in antibiotics}
+    comp_of = {}
+    for ab, parts in RF_COMPONENTS.items():
+        if ab in antibiotics:
+            for part in parts:
+                comp_of.setdefault(_ab_tokens(part), []).append(ab)
+
+    calls, component_hits = {}, {}
     with open(pheno_table_path, encoding="utf-8") as fh:
         for line in fh:
             if line.startswith("#") or not line.strip():
@@ -164,9 +230,17 @@ def parse_resfinder(pheno_table_path, antibiotics=DEFAULT_ANTIBIOTICS):
             parts = line.rstrip("\n").split("\t")
             if len(parts) < 3:
                 continue
-            name = parts[0].strip().lower()
-            if name in wanted:
-                calls[wanted[name]] = 1 if parts[2].strip().lower().startswith("resistant") else 0
+            toks = _ab_tokens(parts[0])
+            is_r = 1 if parts[2].strip().lower().startswith("resistant") else 0
+            if toks in wanted:
+                calls[wanted[toks]] = is_r
+            for ab in comp_of.get(toks, ()):
+                component_hits.setdefault(ab, []).append(is_r)
+
+    # Assemble component-built combinations, but never overwrite a direct row.
+    for ab, hits in component_hits.items():
+        if ab not in calls:
+            calls[ab] = 1 if any(hits) else 0
     return calls
 
 
@@ -177,12 +251,23 @@ def load_phenotype(metadata_file, antibiotics):
     # 562.1 would mismatch the {gid}.fna filename and the model_preds join.
     gid_col = pd.read_csv(metadata_file, nrows=0).columns[0]
     df = pd.read_csv(metadata_file, encoding="utf-8", dtype={gid_col: str})
+    # BV-BRC writes combination agents with a slash ("trimethoprim/
+    # sulfamethoxazole"); this project keys them with underscores. A literal
+    # r.get(ab) therefore returned None for every combination, so those models
+    # were scored against no phenotype at all and reported n=0. Same token-set
+    # match as parse_resfinder, for the same reason.
+    col_of = {_ab_tokens(c): c for c in df.columns}
+    cols = {ab: col_of.get(_ab_tokens(ab)) for ab in antibiotics}
+    missing = sorted(ab for ab, c in cols.items() if c is None)
+    if missing:
+        print(f"  note: no phenotype column for {', '.join(missing)}")
     pheno = {}
     for _, r in df.iterrows():
         gid = str(r[gid_col])
         row = {}
         for ab in antibiotics:
-            v = r.get(ab)
+            col = cols.get(ab)
+            v = r.get(col) if col else None
             row[ab] = None if (v is None or (isinstance(v, float) and v != v)) else int(v)
         pheno[gid] = row
     return pheno
@@ -340,20 +425,49 @@ def _r(x):
     return "NA" if x is None else f"{x:.3f}"
 
 
-def write_kb_evidence(db_path, summary, logger):
+def write_kb_evidence(db_path, summary, logger, organism):
     """Persist the concordance result into amrk.db `validation_evidence` (M11):
     one row per (antibiotic, caller) vs phenotype + the model head-to-head, linked
     to that antibiotic's model run. Idempotent (clears prior concordance rows)."""
     import sqlite3
     conn = sqlite3.connect(str(db_path))
     try:
-        runs = dict(conn.execute("SELECT antibiotic, run_id FROM models").fetchall())
+        # Key the run lookup by (organism, antibiotic), not by antibiotic alone:
+        # the same agent is modelled in several organisms, so an antibiotic-only
+        # map collapses six runs into one and attributes every organism's
+        # concordance to whichever run happened to be last.
+        runs, models = {}, {}
+        for mid, ab, org in conn.execute(
+                "SELECT m.model_id, m.antibiotic, r.organism FROM models m "
+                "JOIN pipeline_runs r ON r.run_id = m.run_id"):
+            models[(org, ab)] = mid
+        for rid, ab, org in conn.execute(
+                "SELECT m.run_id, m.antibiotic, r.organism FROM models m "
+                "JOIN pipeline_runs r ON r.run_id = m.run_id"):
+            runs[(org, ab)] = rid
         etypes = ("concordance_amrfinderplus", "concordance_resfinder", "head_to_head_model")
-        conn.execute(f"DELETE FROM validation_evidence WHERE evidence_type IN "
-                     f"({','.join('?' * len(etypes))})", etypes)
+        # Clear only THIS organism's rows. Deleting every concordance row on each
+        # call meant a six-organism sweep left only the last organism behind.
+        own_runs = [r for (o, _), r in runs.items() if o == organism]
+        if own_runs:
+            conn.execute(
+                f"DELETE FROM validation_evidence WHERE evidence_type IN "
+                f"({','.join('?' * len(etypes))}) AND pipeline_run_id IN "
+                f"({','.join('?' * len(own_runs))})", (*etypes, *own_runs))
+        own_models = [m for (o, _), m in models.items() if o == organism]
+        if own_models:
+            conn.execute("DELETE FROM external_concordance WHERE model_id IN "
+                         f"({','.join('?' * len(own_models))})", own_models)
         n = 0
         for ab, doc in summary["antibiotics"].items():
-            rid = runs.get(ab)
+            rid = runs.get((organism, ab))
+            mid = models.get((organism, ab))
+            # An antibiotic with no model in this organism has nothing to attach
+            # a concordance row to. Writing one anyway left a NULL run_id that no
+            # organism-scoped delete could clear, so re-running the sweep grew the
+            # table instead of replacing it.
+            if rid is None:
+                continue
             for caller, et, src in (
                     ("amrfinderplus", "concordance_amrfinderplus", AFP_SOURCE),
                     ("resfinder", "concordance_resfinder", RF_SOURCE)):
@@ -364,7 +478,20 @@ def write_kb_evidence(db_path, summary, logger):
                     (et, f"{src} vs EUCAST/CLSI (bACC={_r(s['balanced_accuracy'])}, "
                      f"kappa={_r(s['cohen_kappa'])}, n={s['n']})", s["cohen_kappa"], rid))
                 n += 1
+                # The purpose-built table: one row per (model, caller) with the
+                # full clinical metric set, which validation_evidence cannot hold.
+                if mid is not None and s.get("n"):
+                    conn.execute(
+                        "INSERT INTO external_concordance(model_id, caller, reference, "
+                        "n_test, sensitivity, specificity, balanced_accuracy, cohen_kappa, "
+                        "major_error_rate, very_major_error_rate) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        (mid, caller, "EUCAST/CLSI phenotype (BV-BRC)", s["n"],
+                         s.get("sensitivity"), s.get("specificity"),
+                         s.get("balanced_accuracy"), s.get("cohen_kappa"),
+                         s.get("major_error_rate"), s.get("very_major_error_rate")))
         for ab, h in summary.get("head_to_head_model_test_genomes", {}).items():
+            if (organism, ab) not in runs:
+                continue
             m = h["model"]
             conn.execute(
                 "INSERT INTO validation_evidence(unitig_id, evidence_type, "
@@ -372,7 +499,7 @@ def write_kb_evidence(db_path, summary, logger):
                 ("head_to_head_model",
                  f"unitig model vs AMRFinderPlus/ResFinder on held-out test "
                  f"(bACC={_r(m['balanced_accuracy'])}, kappa={_r(m['cohen_kappa'])}, "
-                 f"n={h['n_common_test_genomes']})", m["cohen_kappa"], runs.get(ab)))
+                 f"n={h['n_common_test_genomes']})", m["cohen_kappa"], runs[(organism, ab)]))
             n += 1
         conn.commit()
         logger.info("  ✓ wrote %d concordance evidence rows to KB (%s)", n, db_path)
@@ -405,7 +532,7 @@ def main():
             db_path = Path(args.db) if args.db else (
                 PROJECT_ROOT / "results" / organism / "kb" / "amrk.db")
             if db_path.exists():
-                write_kb_evidence(db_path, summary, logger)
+                write_kb_evidence(db_path, summary, logger, organism)
             else:
                 logger.warning("--write-kb: KB not found at %s (skipped)", db_path)
 

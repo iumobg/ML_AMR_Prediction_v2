@@ -220,6 +220,7 @@ Danisman_Toplanti_Raporu_*.md
 # docs stay tracked: README.md, METHODOLOGY.md, QUICKSTART.md, CHANGELOG.md,
 # CONTRIBUTING.md, LICENSE, CITATION.cff, docs/RELEASE_ZENODO.md.
 HANDOFF.md
+HANDOFF_ARCHIVE.md
 docs/ROADMAP.md
 docs/SCALE_MLOPS_PLAN.md
 docs/TECHNICAL_REVIEW.md
@@ -229,3 +230,16 @@ docs/KB_AKIS_SEMASI.html
 docs/TRUBA_Kurulum_ve_Calistirma_Rehberi.md
 docs/literature/
 docs/review/
+
+# macOS KMC fallback binaries — removed locally, not part of the release
+bin/
+
+# Per-organism result trees pulled from the HPC for local inspection
+/acinetobacter_baumannii/
+/ecoli/
+/enterococcus_faecium/
+/kpneumoniae/
+/pseudomonas_aeruginosa/
+/staphylococcus_aureus/
+/figures_kb/
+/tez/

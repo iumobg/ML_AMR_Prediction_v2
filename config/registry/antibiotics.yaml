@@ -229,7 +229,13 @@ amrfinder_keywords:
   ampicillin:                    [AMPICILLIN, BETA-LACTAM]
   amoxicillin_clavulanic_acid:   [AMOXICILLIN, BETA-LACTAM]
   piperacillin_tazobactam:       [PIPERACILLIN, BETA-LACTAM]
-  ampicillin_sulbactam:          [AMPICILLIN, SULBACTAM, BETA-LACTAM]
+  # No BETA-LACTAM token: sulbactam inhibits many of the enzymes that token
+  # matches, so "some beta-lactamase is present" does not imply resistance to
+  # the combination. Measured on the 1159 A. baumannii genomes: with it,
+  # AMRFinderPlus called 98.4% resistant against a 48.6% phenotype rate.
+  # AMRFinderPlus publishes no SULBACTAM subclass, so the narrow form makes it
+  # unassessable here rather than wrong -- which is the honest outcome.
+  ampicillin_sulbactam:          [AMPICILLIN_SULBACTAM, SULBACTAM]
   cefotaxime:                    [CEFOTAXIME, CEPHALOSPORIN]
   ceftazidime:                   [CEFTAZIDIME, CEPHALOSPORIN]
   cefepime:                      [CEFEPIME, CEPHALOSPORIN]
@@ -237,15 +243,52 @@ amrfinder_keywords:
   meropenem:                     [MEROPENEM, CARBAPENEM]
   imipenem:                      [IMIPENEM, CARBAPENEM]
   ciprofloxacin:                 [CIPROFLOXACIN, FLUOROQUINOLONE, QUINOLONE]
-  gentamicin:                    [GENTAMICIN, AMINOGLYCOSIDE]
-  tobramycin:                    [TOBRAMYCIN, AMINOGLYCOSIDE]
-  amikacin:                      [AMIKACIN, AMINOGLYCOSIDE]
+  # No AMINOGLYCOSIDE class token on the individual aminoglycosides. Measured on
+  # the 1865 E. faecium genomes of the M13 run: with it, AMRFinderPlus called
+  # gentamicin resistant in 99.7% of genomes against a 30.2% phenotype rate,
+  # because the class token fires on every aminoglycoside determinant including
+  # streptomycin-only ones -- a constant predictor, balanced accuracy 0.500.
+  # The subclass strings carry the specific agent ("AMIKACIN/GENTAMICIN/
+  # KANAMYCIN/TOBRAMYCIN"), so the narrow token still matches what it should.
+  gentamicin:                    [GENTAMICIN]
+  tobramycin:                    [TOBRAMYCIN]
+  amikacin:                      [AMIKACIN]
   levofloxacin:                  [LEVOFLOXACIN, FLUOROQUINOLONE, QUINOLONE]
   tetracycline:                  [TETRACYCLINE]
   trimethoprim_sulfamethoxazole: [TRIMETHOPRIM, SULFAMETHOXAZOLE, SULFONAMIDE]
   oxacillin:                     [OXACILLIN, METHICILLIN]
   erythromycin:                  [ERYTHROMYCIN, MACROLIDE]
   clindamycin:                   [CLINDAMYCIN, LINCOSAMIDE]
+
+  # Added 2026-09-01 for the 45-model panel (the block above was written for the
+  # 17-model one). Tokens are deliberately NARROW, for the reason the caveat
+  # above gives: a broad class token makes an unrelated determinant imply
+  # resistance. Two cases where that matters here:
+  #   tigecycline  — NOT given TETRACYCLINE. tet(A)/tet(M) do not confer
+  #                  tigecycline resistance; the glycylcycline was designed to
+  #                  evade them, so the broad token would manufacture false
+  #                  genotypic calls in exactly the model that needs care.
+  #   aztreonam    — NOT given BETA-LACTAM. A narrow TEM-1 does not confer
+  #                  aztreonam resistance; only the monobactam token applies.
+  # ⚠️ STILL TO VERIFY against real AMRFinderPlus output (see the note above):
+  # these are Class/Subclass approximations and the M13 run now produces the
+  # actual strings to check them against.
+  aztreonam:                     [AZTREONAM, MONOBACTAM]
+  chloramphenicol:               [CHLORAMPHENICOL, PHENICOL]
+  colistin:                      [COLISTIN, POLYMYXIN]
+  vancomycin:                    [VANCOMYCIN, GLYCOPEPTIDE]
+  # teicoplanin gets NO glycopeptide token, and so gets no AMRFinderPlus call.
+  # Verified against the delivered output: AMRFinderPlus labels every van
+  # determinant `GLYCOPEPTIDE | VANCOMYCIN` and publishes no TEICOPLANIN
+  # subclass, so a class-level token cannot separate vanA (vancomycin AND
+  # teicoplanin) from vanB (vancomycin only). The E. faecium panel carries both
+  # -- 846 vanA against 73 vanB -- so matching on GLYCOPEPTIDE would score the
+  # vanB genomes teicoplanin-resistant when they are not, manufacturing false
+  # positives against the tool. The limit belongs to the tool's own resolution,
+  # so teicoplanin is left out of the AMRFinderPlus comparison and reported as
+  # such. ResFinder publishes a teicoplanin row and is compared normally.
+  teicoplanin:                   [TEICOPLANIN]
+  tigecycline:                   [TIGECYCLINE]
 
 # ============================================================================
 # DOMINANT RESISTANCE MECHANISM per class — acquired gene vs target-gene SNP.

@@ -6,7 +6,7 @@ kb_tables.py exports (+ raw 12b null CSVs for the permutation histogram).
 
 Run kb_tables.py FIRST, then:
     python scripts/kb_figures.py --tables results/tables --results results \
-        --out figures [--only performance,cpss_pfer,cross_org,mechanism,null_hist]
+        --out figures [--only performance,cpss_pfer,cross_org,mechanism,null_hist,combos]
 
 Each figure is saved as PNG (200 dpi) + PDF. Colours come from PALETTE (registry slugs); any organism not listed there gets an
 auto-assigned colour, and display names come from the registry. Edit CLASS_ORDER /
@@ -26,9 +26,12 @@ import pandas as pd
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
-CLASS_ORDER = ["penicillins", "cephalosporins", "beta_lactams_carbapenems_others",
-               "quinolones", "aminoglycosides", "tetracyclines",
-               "folate_pathway_inhibitors"]
+# Preferred display order for the classes that carry the thesis's headline results;
+# _class_order() appends everything else alphabetically, so this list never filters.
+CLASS_ORDER = ["penicillins", "cephalosporins", "carbapenems", "monobactams",
+               "quinolones", "aminoglycosides", "tetracyclines", "glycylcyclines",
+               "glycopeptides", "macrolides", "lincosamides", "phenicols",
+               "polymyxins", "folate_pathway_inhibitors"]
 # Keys are REGISTRY SLUGS (organisms.yaml / pipeline_runs.organism). They used to be
 # short forms ("saureus", "paeruginosa") that never matched the real slugs, so four of
 # the six organisms silently fell through to the auto-assigned _EXTRA colours.
@@ -37,16 +40,22 @@ PALETTE = {"ecoli": "#2c7fb8", "kpneumoniae": "#de2d26",
            "pseudomonas_aeruginosa": "#31a354", "enterococcus_faecium": "#a6761d"}
 _EXTRA = ["#666666", "#1b9e77", "#d95f02"]
 
-# The 7 orthogonal validation layers (evidence_type in the KB) in pipeline order,
-# biological → statistical. Label used on the evidence-layer heatmap (fig 06).
-EVIDENCE_ORDER = [
-    ("blast",                "BLAST\n(CARD/NCBI)"),
-    ("background_frequency", "Prevalence\nR vs S"),
-    ("snp",                  "SNP allele\n(CARD var.)"),
-    ("permutation_mda",      "MDA\npermutation"),
-    ("label_permutation",    "Label-perm\n(model)"),
-    ("stability_selection",  "CPSS\nstability"),
-    ("pyseer_lmm",           "pyseer LMM\n(lineage)"),
+# The six layers `classify_evidence_tier()` folds into a grade, in its own order, keyed
+# by the token it writes into unitig_evidence_tier.evidence_layers. NOT the seven
+# evidence_type values in validation_evidence: `label_permutation` is model-level and
+# grades no biomarker, so it belongs to figure 05, not to this per-biomarker grid.
+# Same palette and order as kb_figures_biology, so a tier is one colour across the set.
+TIER_COLOURS = {"confirmed": "#238b45", "strong_novel": "#d62728",
+                "candidate": "#74c476", "weak": "#c6dbef", "none": "#eeeeee"}
+TIER_ORDER = ["confirmed", "strong_novel", "candidate", "weak", "none"]
+
+TIER_LAYER_ORDER = [
+    ("blast",      "BLAST\n(CARD)"),
+    ("prevalence", "Prevalence\nR vs S"),
+    ("snp",        "SNP allele\n(CARD var.)"),
+    ("mda",        "MDA\npermutation"),
+    ("cpss",       "CPSS\nstability"),
+    ("pyseer",     "pyseer LMM\n(lineage)"),
 ]
 
 
@@ -87,7 +96,8 @@ def _class_order(series):
     """Drug classes present in the data: the curated CLASS_ORDER first, then anything
     else alphabetically. CLASS_ORDER lists 7 classes while the panel now spans 14, and
     filtering *to* it silently dropped half the classes from the overview figure —
-    a figure must never quietly narrow the KB it claims to summarise."""
+    a figure must never quietly narrow the KB it claims to summarise. CLASS_ORDER now
+    lists all 14, but the append-the-rest behaviour is what keeps that safe."""
     present = set(str(c) for c in series.dropna())
     known = [c for c in CLASS_ORDER if c in present]
     return known + sorted(present - set(known))
@@ -124,18 +134,42 @@ def fig_performance(tables, out):
     x = np.arange(len(df))
     col = [_colour(o) for o in df["organism"]]
     fig, ax = plt.subplots(figsize=(13, 5.5))
-    ax.bar(x, df["lineage_cv_auc"], yerr=df["lineage_cv_std"], color=col,
-           capsize=3, edgecolor="black", linewidth=0.4, alpha=0.9)
+    # Clip the upper whisker at 1.0. ROC-AUC cannot exceed 1, but mean+SD can, and the
+    # unclipped whisker ran past the axis and was cut off mid-line — which reads as a
+    # rendering fault rather than as a wide interval.
+    auc = df["lineage_cv_auc"].to_numpy(float)
+    sd = df["lineage_cv_std"].to_numpy(float)
+    yerr = np.vstack([sd, np.minimum(sd, 1.0 - auc)])
+    ax.bar(x, auc, yerr=yerr, color=col, capsize=3, edgecolor="black",
+           linewidth=0.4, alpha=0.9)
     ax.axhline(0.5, ls="--", c="grey", lw=0.8)
-    ax.text(0.3, 0.505, "chance", fontsize=8, color="grey", va="bottom", ha="left")
+    # Park the chance label in clear air on the right; at x=0.3 it sat behind the first
+    # bar and was unreadable.
+    ax.text(len(df) - 1.2, 0.505, "chance", fontsize=8, color="grey",
+            va="bottom", ha="right")
     # Floor below the weakest model (0.429 for A. baumannii ceftazidime): a 0.4 floor
     # clipped that bar to an invisible sliver, hiding the panel's most informative
     # result — the clonally-confounded model lineage-CV is supposed to expose.
-    ax.set_ylim(min(0.40, float(df["lineage_cv_auc"].min()) - 0.06), 1.02)
+    ax.set_ylim(min(0.40, float(auc.min()) - 0.06), 1.02)
     ax.set_xticks(x)
     ax.set_xticklabels([f"{_short(a)}\n({_abbr(o)})" for a, o in zip(df.antibiotic, df.organism)], rotation=90, fontsize=7.5)
     ax.set_ylabel("Lineage-aware CV ROC-AUC (mean ± SD)")
-    ax.set_title("Per-antibiotic generalisation performance")
+
+    # Call out any model at or below chance. This is the thesis's clonal-confounding
+    # exhibit, and an unlabelled short bar in a row of 45 is easy to read past.
+    below = np.where(auc <= 0.5)[0]
+    for i in below:
+        ax.annotate(f"{auc[i]:.3f}\nbelow chance", xy=(x[i], auc[i]),
+                    xytext=(x[i] + 2.6, 0.455), fontsize=7.5, color="#b2182b",
+                    fontweight="bold", ha="center", va="center",
+                    bbox=dict(boxstyle="round,pad=0.25", fc="white",
+                              ec="#b2182b", lw=0.6, alpha=0.95),
+                    arrowprops=dict(arrowstyle="->", color="#b2182b", lw=1.0))
+    n_below = len(below)
+    sub = (f" — {n_below} model{'s' if n_below != 1 else ''} at or below chance"
+           if n_below else "")
+    ax.set_title(f"Per-antibiotic generalisation performance, lineage-aware CV "
+                 f"(n={len(df)} models, mean {auc.mean():.3f}){sub}", fontsize=11)
     _legend(ax, df["organism"].unique(), outside=True)
     _save(fig, out, "01_performance_lineageCV")
 
@@ -147,10 +181,20 @@ def fig_cpss_pfer(tables, out):
     fig, (a1, a2) = plt.subplots(2, 1, figsize=(13, 7), sharex=True, gridspec_kw={"hspace": 0.08})
     a1.bar(x, df["cpss_n_stable"], color=col, edgecolor="k", lw=0.4, alpha=0.9)
     a1.set_ylabel("CPSS stable unitigs (π≥0.6)")
-    a1.set_title("CPSS stability selection — stable biomarker count & PFER bound")
+    # Quantify the PFER>1 models. HANDOFF/METHODOLOGY carry this as a stated
+    # limitation ("some models exceed one expected false positive"), and the figure is
+    # where a reader should be able to check it rather than take it on trust.
+    pf = pd.to_numeric(df["pfer_bound"], errors="coerce")
+    n_over = int((pf > 1).sum())
+    a1.set_title("CPSS stability selection — stable biomarker count & PFER bound\n"
+                 f"{n_over} of {len(df)} models exceed PFER = 1 "
+                 f"(max {pf.max():.1f}): in those stable sets more than one selected "
+                 "unitig is expected to be a false positive", fontsize=10.5)
     a2.bar(x, df["pfer_bound"], color=col, edgecolor="k", lw=0.4, alpha=0.9)
     a2.set_yscale("log")
     a2.axhline(1, ls="--", c="grey", lw=0.8)
+    a2.text(len(df) - 0.5, 1.06, "PFER = 1", fontsize=7.5, color="grey",
+            ha="right", va="bottom")
     a2.set_ylabel("PFER bound (E[false positives], log)")
     a2.set_xticks(x)
     a2.set_xticklabels([f"{_short(a)} ({_abbr(o)})" for a, o in zip(df.antibiotic, df.organism)], rotation=90, fontsize=7.5)
@@ -169,6 +213,16 @@ _FAM_MAP = {
     "OXA beta-lactamase;OXA-48-like beta-lactamase": "OXA-48-like",
     "sulfonamide resistant sul": "sul",
     "trimethoprim resistant dihydrofolate reductase dfr": "dfr",
+    "Erm 23S ribosomal RNA methyltransferase": "Erm (23S rRNA MTase)",
+    "macrolide phosphotransferase (MPH)": "MPH",
+    "chloramphenicol acetyltransferase (CAT)": "CAT",
+    "streptothricin acetyltransferase (SAT)": "SAT",
+    "msr-type ABC-F protein": "Msr (ABC-F)",
+    "methicillin resistant PBP2": "PBP2 (mecA)",
+    "tetracycline-resistant ribosomal protection protein": "ribosomal protection",
+    "ADC beta-lactamases pending classification for carbapenemase activity": "ADC",
+    "Van ligase;glycopeptide resistance gene cluster": "vanA ligase",
+    "AAC(6');AAC(6')-Ib-cr": "AAC(6')",
 }
 
 
@@ -185,10 +239,23 @@ def _fam(s):
     s = str(s).strip()
     if s in _FAM_MAP:
         return _FAM_MAP[s]
-    if "beta-lactamase" in s:
-        return s.replace(" beta-lactamase", "").strip()
     if not s:
         return s
+    # ARO composes some families as semicolon-joined qualifiers. Splitting on
+    # whitespace alone left labels like "cluster;vanS" and "AAC(6');AAC(6')-Ib-cr"
+    # on the axes, so resolve the two shapes that occur here before anything else:
+    #   "glycopeptide resistance gene cluster;vanS" -> "vanS (van cluster)"
+    #   "OXA beta-lactamase;OXA-23-like beta-lactamase" -> "OXA-23-like"
+    if ";" in s:
+        head, _, tail = s.partition(";")
+        head, tail = head.strip(), tail.strip()
+        if "cluster" in head.lower() and tail:
+            return f"{tail} (van cluster)" if tail.lower().startswith("van") else tail
+        # Same family qualified twice: keep the more specific (longer) side.
+        pick = tail if len(tail) >= len(head) else head
+        return _fam(pick) if pick != s else pick
+    if "beta-lactamase" in s:
+        return s.replace(" beta-lactamase", "").strip()
     parts = s.split()
     if parts[-1].lower() in _GENERIC_TAIL:
         # Drop the trailing generic words, then keep the two that identify the family:
@@ -200,8 +267,7 @@ def _fam(s):
     return parts[-1]
 
 
-CLASS_SHORT = {"beta_lactams_carbapenems_others": "carbapenems / others",
-               "folate_pathway_inhibitors": "folate inhibitors"}
+CLASS_SHORT = {"folate_pathway_inhibitors": "folate inhibitors"}
 
 
 def fig_overview(tables, out, db):
@@ -309,7 +375,15 @@ def fig_mechanism(tables, out):
             if v > 0:
                 ax.text(j, i, f"{int(v)}", ha="center", va="center", fontsize=6,
                         color="white" if v > thr else "black")
-    ax.set_title("On-target confirmed resistance gene families across models (cell = # unitigs)", fontsize=11)
+    # Say how many models are drawn. Columns exist only for models with at least one
+    # on-target hit, and a reader who is not told that reads the missing ones as
+    # "no resistance genes found" rather than "off-target hits only".
+    n_models_total = len(ms)
+    ax.set_title("On-target confirmed resistance gene families across models "
+                 "(cell = # unitigs)\n"
+                 f"{len(cols)} of {n_models_total} models have an on-target hit; "
+                 "the rest recovered only off-target or no CARD genes",
+                 fontsize=10.5)
     fig.colorbar(im, ax=ax, fraction=0.02, pad=0.02, label="unitigs (log)")
     _save(fig, out, "04_mechanism_heatmap")
 
@@ -324,60 +398,239 @@ def fig_null_hist(tables, results, out):
     nrow = int(np.ceil(n / ncol))
     fig, axes = plt.subplots(nrow, ncol, figsize=(3 * ncol, 2.2 * nrow))
     axes = np.atleast_1d(axes).ravel()
+    n_perm = 0
     for ax, f in zip(axes, files):
         ab = os.path.basename(f).replace("12b_label_permutation_nulls_", "").replace(".csv", "")
+        # The organism is in the path, not the filename. Without it four panels were
+        # titled "tetracycline" and four "ciprofloxacin", with no way to tell them apart.
+        org = Path(f).parts[-4] if len(Path(f).parts) >= 4 else ""
         d = pd.read_csv(f)
-        col = d.columns[0]
+        # 12b writes `permutation,null_roc_auc`. Taking columns[0] histogrammed the
+        # permutation INDEX (1..N), not the null AUC — and the hardcoded 0.4-1.0 xlim
+        # then pushed that 1..50 range entirely off-axis, so all 45 panels rendered as
+        # empty boxes with a lone red line and nobody could tell the data was wrong.
+        # Name the column; fall back to the last one only if the schema changes.
+        col = "null_roc_auc" if "null_roc_auc" in d.columns else d.columns[-1]
         nulls = pd.to_numeric(d[col], errors="coerce").dropna()
+        if nulls.empty:
+            ax.axis("off")
+            continue
         summ = json.load(open(f.replace("_nulls_", "_summary_").replace(".csv", ".json"))) if os.path.exists(f.replace("_nulls_", "_summary_").replace(".csv", ".json")) else {}
         real = summ.get("real_roc_auc") or summ.get("real_test_roc_auc")
-        ax.hist(nulls, bins=15, color="#999999", edgecolor="white")
+        n_perm = max(n_perm, len(nulls))
+        # Two reasons this panel used to render as an empty box with one red line:
+        # a white edgecolor on bars only ~2 px wide at this panel size painted over the
+        # fill entirely, and a hardcoded xlim of 0.4-1.0 squeezed a null that lives in
+        # ~0.50-0.65 into a quarter of the axis. Fill without an edge, and let each
+        # panel frame its own data.
+        ax.hist(nulls, bins=12, color="#9e9ac8", edgecolor="none")
         if real:
-            ax.axvline(real, color="#d7301f", lw=2)
-        ax.set_title(_short(ab), fontsize=8)
-        ax.set_xlim(0.4, 1.0)
+            ax.axvline(real, color="#d7301f", lw=1.6)
+        lo = float(min(nulls.min(), real if real else nulls.min()))
+        hi = float(max(nulls.max(), real if real else nulls.max()))
+        pad = max(0.02, 0.08 * (hi - lo))
+        ax.set_xlim(lo - pad, hi + pad)
+        ax.set_title(f"{_short(ab)} ({_abbr(org)})" if org else _short(ab), fontsize=7.5)
         ax.tick_params(labelsize=6)
+        ax.set_yticks([])
     for ax in axes[n:]:
         ax.axis("off")
-    fig.suptitle("Label-permutation null vs REAL ROC-AUC (red line) — model-level significance", fontsize=11)
+    fig.suptitle("Label-permutation null (purple) vs the model's REAL ROC-AUC (red line)\n"
+                 f"{n} models · N={n_perm} shuffles each — every real AUC sits outside its "
+                 "own null, so p is at the 1/(N+1) floor for all of them\n"
+                 "each panel is scaled to its own null: the nulls differ in location and "
+                 "width, which a shared axis hid", fontsize=10)
     fig.tight_layout(rect=[0, 0, 1, 0.97])
     _save(fig, out, "05_label_permutation_nulls")
 
 
 def fig_evidence_layers(tables, out, db):
-    """THE backbone figure: every model is filtered through 7 orthogonal
-    validation layers. Heatmap = evidence units (unitigs, or 1 for the
-    model-level label-permutation) supporting each model in each layer."""
+    """THE backbone figure: how many of each model's biomarkers PASSED each tier layer.
+
+    Rewritten. It used to count rows in ``validation_evidence``, which is the number of
+    candidates *tested* — not the number that passed. Because BLAST, prevalence and MDA
+    all test the same candidate set, those three columns were identical in every row
+    (51/51/51, 59/59/59 …), and the figure asserted 40–70 MDA hits per model while
+    figure 28 correctly reported that **zero** unitigs clear the MDA FDR in any model.
+    The SNP column had a second fault: it counted step-11 unitigs that are not
+    biomarkers of that model at all (they never enter ``unitig_model_scores``).
+
+    The tier ladder keeps its own record of what actually passed —
+    ``unitig_evidence_tier.evidence_layers`` — so read that. Zeros are drawn as an
+    explicit grey ``0`` rather than left blank: two layers are zero everywhere, and a
+    blank cell reads as "not applicable" when the honest statement is "measured, none
+    passed". See METHODOLOGY.md §5.2.
+    """
     import sqlite3
     ms = _sortkey(pd.read_csv(tables / "models_summary.csv")).reset_index(drop=True)
     conn = sqlite3.connect(str(db))
-    counts = {}  # run_id -> {evidence_type: n}
-    for run_id, et, n in conn.execute(
-            "SELECT pipeline_run_id, evidence_type, COUNT(*) FROM validation_evidence "
-            "GROUP BY pipeline_run_id, evidence_type"):
-        counts.setdefault(run_id, {})[et] = n
+    counts, totals = {}, {}
+    for run_id, layers, n in conn.execute(
+            "SELECT p.run_id, e.evidence_layers, COUNT(*) "
+            "FROM unitig_evidence_tier e "
+            "JOIN models m ON m.model_id = e.model_id "
+            "JOIN pipeline_runs p ON p.run_id = m.run_id "
+            "GROUP BY p.run_id, e.evidence_layers"):
+        totals[run_id] = totals.get(run_id, 0) + n
+        for tok in (layers or "").split(","):
+            tok = tok.strip()
+            if tok:
+                counts.setdefault(run_id, {})[tok] = counts.get(run_id, {}).get(tok, 0) + n
     conn.close()
-    types = [t for t, _ in EVIDENCE_ORDER]
-    M = np.array([[counts.get(r, {}).get(t, 0) for t in types] for r in ms["run_id"]], float)
-    disp = np.where(M > 0, M, np.nan)  # 0 = layer not applicable (e.g. no SNP) → blank
-    fig, ax = plt.subplots(figsize=(8.5, 0.45 * len(ms) + 1.6))
+
+    keys = [k for k, _ in TIER_LAYER_ORDER]
+    M = np.array([[counts.get(r, {}).get(k, 0) for k in keys] for r in ms["run_id"]], float)
+    disp = np.where(M > 0, M, np.nan)
+    fig, ax = plt.subplots(figsize=(8.8, 0.45 * len(ms) + 2.0))
     from matplotlib.colors import LogNorm
     im = ax.imshow(disp, aspect="auto", cmap="YlGnBu",
                    norm=LogNorm(vmin=1, vmax=np.nanmax(disp)))
-    ax.set_xticks(range(len(types)))
-    ax.set_xticklabels([lab for _, lab in EVIDENCE_ORDER], fontsize=8)
+    ax.set_xticks(range(len(keys)))
+    ax.set_xticklabels([lab for _, lab in TIER_LAYER_ORDER], fontsize=8)
     ax.set_yticks(range(len(ms)))
-    ax.set_yticklabels([f"{_short(a)} ({_abbr(o)})" for a, o in zip(ms.antibiotic, ms.organism)], fontsize=7.5)
+    ax.set_yticklabels([f"{_short(a)} ({_abbr(o)})  n={totals.get(r, 0)}"
+                        for a, o, r in zip(ms.antibiotic, ms.organism, ms.run_id)],
+                       fontsize=7.5)
+    thr = np.nanmax(disp) ** 0.5
     for i in range(len(ms)):
-        for j in range(len(types)):
+        for j in range(len(keys)):
             v = M[i, j]
-            if v > 0:
-                ax.text(j, i, f"{int(v)}", ha="center", va="center", fontsize=6.5,
-                        color="white" if v > np.nanmax(disp) ** 0.5 else "black")
-    ax.set_title("Every biomarker is filtered through 7 orthogonal validation layers\n"
-                 "(cell = supporting evidence units; blank = layer not applicable)", fontsize=10)
-    fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02, label="evidence units (log)")
+            ax.text(j, i, f"{int(v)}", ha="center", va="center", fontsize=6.5,
+                    color=("white" if v > thr else "black") if v > 0 else "#b0b0b0")
+    dead = [lab.replace("\n", " ") for k, lab in TIER_LAYER_ORDER if M[:, keys.index(k)].sum() == 0]
+    note = (f"  ·  {' and '.join(dead)} pass nowhere (0/45 models)" if dead else "")
+    ax.set_title("Biomarkers passing each tier layer, per model\n"
+                 "cell = biomarkers of that model passing that layer; "
+                 "row label n = biomarkers graded" + note, fontsize=10)
+    fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02, label="biomarkers passing (log)")
     _save(fig, out, "06_evidence_layers")
+
+
+def fig_evidence_combinations(tables, out, db):
+    """Which evidence layers fire TOGETHER, and what grade each combination earns.
+
+    Figure 06 counts each layer separately, per model. That marginal view cannot show
+    co-occurrence: it says prevalence fired 2,055 times and pyseer 1,172 times without
+    saying that 558 biomarkers rest on those two and nothing else. This is the UpSet of
+    the same ladder, over all 3,571 graded (unitig, model) pairs.
+
+    Worth drawing because the mapping turns out to be deterministic: every one of the 14
+    observed combinations earns exactly one tier, so colouring the bars by tier makes
+    `classify_evidence_tier()` readable without opening the code. Two things become
+    visible that prose keeps having to assert:
+
+      * `blast` alone earns `candidate` while a lone statistical layer earns `weak` --
+        a CARD hit outweighs one statistical signal.
+      * `strong_novel` is not a separate test. It is exactly the cell where three
+        statistical layers fire and BLAST does not: 23 biomarkers with real evidence and
+        no known CARD gene behind them.
+
+    The `snp` and `mda` rows are empty across every column, and are drawn greyed with
+    the reason rather than omitted -- a missing row reads as "not measured" when the
+    honest statement is "measured, never fires". See METHODOLOGY.md 5.2.
+    """
+    import sqlite3
+    from matplotlib.patches import Rectangle
+    conn = sqlite3.connect(str(db))
+    raw = conn.execute("SELECT COALESCE(evidence_layers,''), evidence_tier, COUNT(*) "
+                       "FROM unitig_evidence_tier GROUP BY 1,2").fetchall()
+    conn.close()
+
+    combos = {}
+    for layers, tier, n in raw:
+        toks = tuple(t for t in (layers or "").split(",") if t.strip())
+        combos.setdefault(toks, {})[tier] = combos.get(toks, {}).get(tier, 0) + n
+    # If a combination ever earned two grades the colour would be a lie, so say so.
+    ambiguous = {k: v for k, v in combos.items() if len(v) > 1}
+    items = sorted(((k, max(v, key=v.get), sum(v.values())) for k, v in combos.items()),
+                   key=lambda x: -x[2])
+    total = sum(n for _, _, n in items)
+
+    keys = [k for k, _ in TIER_LAYER_ORDER]
+    marg = {k: sum(n for toks, _, n in items if k in toks) for k in keys}
+    row_order = ([kv for kv in TIER_LAYER_ORDER if marg[kv[0]]]
+                 + [kv for kv in TIER_LAYER_ORDER if not marg[kv[0]]])
+    n_live = sum(1 for kv in TIER_LAYER_ORDER if marg[kv[0]])
+
+    fig, (ax, axm) = plt.subplots(
+        2, 1, figsize=(12.4, 7.4), sharex=True,
+        gridspec_kw={"height_ratios": [3, 2], "hspace": 0.06})
+
+    xs = range(len(items))
+    for x, (toks, tier, n) in zip(xs, items):
+        ax.bar(x, n, width=0.62, color=TIER_COLOURS.get(tier, "#888888"),
+               edgecolor="k", lw=0.4, zorder=3)
+        ax.annotate(f"{n:,}", (x, n), textcoords="offset points", xytext=(0, 3),
+                    ha="center", fontsize=8, zorder=4)
+    ax.set_yscale("log")
+    ax.set_ylim(0.7, max(n for _, _, n in items) * 2.4)
+    ax.set_ylabel("biomarkers (log)")
+    ax.grid(axis="y", ls=":", lw=0.5, alpha=0.5, zorder=0)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+
+    handles = [plt.Rectangle((0, 0), 1, 1, fc=TIER_COLOURS.get(t, "#888"), ec="k", lw=0.4)
+               for t in TIER_ORDER]
+    ax.legend(handles, TIER_ORDER, ncol=5, fontsize=8, frameon=False,
+              loc="upper right", title="evidence tier earned", title_fontsize=8)
+
+    # The novel cell is the whole point of the KB; point at it.
+    for x, (toks, tier, n) in zip(xs, items):
+        if tier == "strong_novel":
+            ax.add_patch(Rectangle((x - 0.46, 0.7), 0.92, n / 0.7, fill=False,
+                                   ec=TIER_COLOURS["strong_novel"], lw=1.4, ls="--",
+                                   zorder=5, clip_on=False))
+            ax.annotate("three statistical layers,\nno CARD hit = novel",
+                        (x, n), textcoords="offset points", xytext=(0, 52),
+                        ha="center", fontsize=8, color=TIER_COLOURS["strong_novel"],
+                        arrowprops=dict(arrowstyle="->", lw=1.0, shrinkB=16,
+                                        color=TIER_COLOURS["strong_novel"]))
+
+    dead = []
+    for y, (k, lab) in enumerate(row_order):
+        alive = marg[k] > 0
+        if not alive:
+            dead.append(lab.replace("\n", " "))
+        axm.axhline(y, color="#eeeeee", lw=8, zorder=0)
+        for x, (toks, _, _) in zip(xs, items):
+            on = k in toks
+            axm.scatter(x, y, s=54, zorder=3,
+                        color="#333333" if on else ("#dddddd" if alive else "#f2f2f2"))
+    for x, (toks, _, _) in zip(xs, items):
+        ys = [i for i, (kk, _) in enumerate(row_order) if kk in toks]
+        if len(ys) > 1:
+            axm.plot([x, x], [min(ys), max(ys)], color="#333333", lw=1.6, zorder=2)
+
+    axm.set_yticks(range(len(row_order)))
+    axm.set_yticklabels(
+        [f"{lab.replace(chr(10), ' ')}  ({marg[k]:,})" if marg[k]
+         else f"{lab.replace(chr(10), ' ')}  (0 — never fires)"
+         for k, lab in row_order], fontsize=8.5)
+    for tick, (k, _) in zip(axm.get_yticklabels(), row_order):
+        if not marg[k]:
+            tick.set_color("#b00020")
+    if n_live < len(row_order):        # rule off the layers that never fire
+        axm.axhline(n_live - 0.5, color="#b00020", lw=0.8, ls=":", zorder=4)
+    axm.set_ylim(len(row_order) - 0.5, -0.5)
+    axm.set_xlim(-0.7, len(items) - 0.3)
+    axm.set_xticks(list(xs))
+    axm.set_xticklabels([f"{len(t)}" if t else "0" for t, _, _ in items], fontsize=8)
+    axm.set_xlabel("layers firing in the combination  ·  one column per observed combination")
+    for side in ("top", "right", "left"):
+        axm.spines[side].set_visible(False)
+    axm.tick_params(axis="y", length=0)
+
+    sub = (f"{total:,} graded (unitig, model) pairs · {len(items)} observed combinations · "
+           f"each earns exactly one tier, so the colour IS the grading rule")
+    if ambiguous:
+        sub = (f"{total:,} pairs · WARNING: {len(ambiguous)} combination(s) span more than "
+               f"one tier; bar colour shows the majority grade")
+    if dead:
+        sub += "\nmeasured but never fires: " + ", ".join(dead)
+    fig.suptitle("How the evidence layers combine, and what each combination is worth\n"
+                 + sub, fontsize=11.5)
+    fig.subplots_adjust(top=0.84)
+    _save(fig, out, "39_evidence_combinations")
 
 
 def fig_significance(tables, out, db):
@@ -419,7 +672,9 @@ def fig_significance(tables, out, db):
     ax.set_xlabel("ROC-AUC")
     ax.set_title("Model-level significance: observed AUC (colour) ≫ label-shuffle null max (grey)\n"
                  "black tick = lineage-aware CV AUC (the reported, generalisation metric)\n"
-                 "all p ≈ 0.02 (N=50 permutations)", fontsize=10)
+                 "every model sits at p = 1/(N+1) \u2248 0.02, the SMALLEST value "
+                 "N=50 permutations can return — a floor, not a measured difference "
+                 "between models", fontsize=9.5)
     ax.legend(handles=[
         Line2D([], [], marker="o", ls="", color="#444444", label="observed AUC (12b split)"),
         Line2D([], [], marker="o", ls="", color="#999999", label="label-shuffle null max"),
@@ -470,6 +725,7 @@ FIGS = {"overview": lambda t, r, o, db: fig_overview(t, o, db),
         "cross_org": lambda t, r, o, db: fig_cross_org(t, o),
         "mechanism": lambda t, r, o, db: fig_mechanism(t, o),
         "evidence": lambda t, r, o, db: fig_evidence_layers(t, o, db),
+        "combos": lambda t, r, o, db: fig_evidence_combinations(t, o, db),
         "significance": lambda t, r, o, db: fig_significance(t, o, db),
         "null_hist": lambda t, r, o, db: fig_null_hist(t, r, o)}
 

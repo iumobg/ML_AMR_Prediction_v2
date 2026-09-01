@@ -10,7 +10,7 @@ kb_figures.py covers the model/KB end; this covers the beginning of the pipeline
 Usage:
     python scripts/kb_figures_data.py --results results --data data/processed \
         --tables results/tables --db results/kb/amrk.db --out results/figures \
-        [--only qc,contiguity,passrate,composition,balance,lineage,clonality,resistance,features,lengths]
+        [--only qc,contiguity,passrate,composition,balance,lineage,clonality,structure,resistance,features,lengths]
 
 Figures (results/figures/):
     10_genome_qc_scatter          CheckM2 completeness x contamination, per organism
@@ -130,7 +130,9 @@ def fig_pass_rates(results, orgs, out):
         rows.append({"organism": org, "n": s.get("n_genomes"), "pass": s.get("n_pass"),
                      "fail": s.get("n_fail"), "rate": s.get("pass_rate"),
                      "completeness": s.get("n_fail_completeness"),
-                     "contamination": s.get("n_fail_contamination")})
+                     "contamination": s.get("n_fail_contamination"),
+                     "n50": s.get("n_fail_n50"),
+                     "contigs": s.get("n_fail_contigs")})
     if not rows:
         print("  (pass-rate: no 02d summaries — skipped)"); return
     df = pd.DataFrame(rows)
@@ -142,15 +144,35 @@ def fig_pass_rates(results, orgs, out):
         a1.text(xi, 100 * r + 0.4, f"{100*r:.1f}%\n(n={n})", ha="center", fontsize=8)
     a1.set_xticks(x); a1.set_xticklabels([_abbr(o) for o in df.organism])
     a1.set_ylim(80, 103); a1.set_ylabel("genomes passing QC (%)")
-    a1.set_title("CheckM2 pass rate", fontsize=10)
-    b = a2.bar(x - 0.2, df["completeness"], width=0.4, color="#2c7fb8",
-               edgecolor="k", lw=0.4, label="completeness <95 %")
-    a2.bar(x + 0.2, df["contamination"], width=0.4, color="#d62728",
-           edgecolor="k", lw=0.4, label="contamination >5 %")
+    tot_p, tot_n = int(df["pass"].sum()), int(df["pass"].sum() + df["fail"].sum())
+    a1.set_title("CheckM2 pass rate — the ENFORCED gate\n"
+                 f"{tot_p:,}/{tot_n:,} = {100*tot_p/tot_n:.1f}% pass "
+                 "(note the truncated y-axis)", fontsize=9.5)
+    # Four criteria are COMPUTED; only two are ENFORCED. The assembly-contiguity pair
+    # was evaluated and then deliberately not applied, because an N50>=50 kb gate
+    # removed 63% of the E. faecium collection (1,305 of 2,078) — short-contig draft
+    # assemblies are the norm for that species in BV-BRC, so the gate was selecting on
+    # assembly provenance rather than on genome quality. Plotting only the two enforced
+    # reasons, with no trace of the other two, let the figure imply that contiguity was
+    # never a question. It has to be visible, and visibly not applied.
+    w = 0.2
+    a2.bar(x - 1.5 * w, df["completeness"], width=w, color="#2c7fb8",
+           edgecolor="k", lw=0.4, label="completeness <95 % (enforced)")
+    a2.bar(x - 0.5 * w, df["contamination"], width=w, color="#d62728",
+           edgecolor="k", lw=0.4, label="contamination >5 % (enforced)")
+    a2.bar(x + 0.5 * w, df["n50"], width=w, color="#bdbdbd", edgecolor="k", lw=0.4,
+           hatch="//", label="N50 <50 kb (computed, NOT enforced)")
+    a2.bar(x + 1.5 * w, df["contigs"], width=w, color="#f0f0f0", edgecolor="k", lw=0.4,
+           hatch="//", label="contigs >500 (computed, NOT enforced)")
+    a2.set_yscale("symlog", linthresh=10)
     a2.set_xticks(x); a2.set_xticklabels([_abbr(o) for o in df.organism])
-    a2.set_ylabel("genomes excluded"); a2.legend(fontsize=8, frameon=False)
-    a2.set_title("Why genomes were excluded", fontsize=10)
-    del b
+    a2.set_ylabel("genomes failing the criterion (symlog)")
+    a2.legend(fontsize=7, frameon=False, ncol=2)
+    worst = df.loc[df["n50"].idxmax()]
+    a2.set_title("Why genomes were excluded — and what was measured but not applied\n"
+                 f"an N50 gate would have removed {int(worst['n50']):,} of "
+                 f"{int(worst['n'])} {_abbr(worst['organism'])} genomes "
+                 f"({100*worst['n50']/worst['n']:.0f}%)", fontsize=9)
     fig.tight_layout()
     _save(fig, out, "12_qc_pass_rates")
 
@@ -230,12 +252,20 @@ def _clusters(data, org):
 def fig_lineage_sizes(data, orgs, out):
     """Rank-size curves: how much of each organism sits in its biggest lineage.
     This is the property lineage-aware CV exists to respect."""
+    # Bail out BEFORE creating the figure when no organism has cluster data. Skipping
+    # each organism individually and saving anyway wrote a fully empty pair of axes over
+    # a good figure — this file lives in data/processed/, which is routinely pruned from
+    # the laptop, so "regenerate everything" silently destroyed the artefact instead of
+    # leaving it alone. Every other generator here skips; this one has to as well.
+    have = [(org, _clusters(data, org)) for org in orgs]
+    have = [(org, cl) for org, cl in have if cl is not None]
+    if not have:
+        print("  (lineage sizes: no PopPUNK cluster files under "
+              f"{data} — skipped, existing figure left untouched)")
+        return
     fig, ax = plt.subplots(figsize=(8.5, 5))
     txt = []
-    for org in orgs:
-        cl = _clusters(data, org)
-        if cl is None:
-            continue
+    for org, cl in have:
         sizes = cl["Cluster"].value_counts().to_numpy()
         frac = 100 * sizes / sizes.sum()
         ax.plot(np.arange(1, len(frac) + 1), frac, marker="o", ms=2.5, lw=1.2,
@@ -255,6 +285,30 @@ def fig_lineage_resistance(data, ms, orgs, out):
     """Resistance rate INSIDE the largest lineages — clonal confounding, seen directly.
     A lineage that is ~all-resistant lets a model score by recognising the clone;
     holding that lineage out is precisely what lineage-aware CV does."""
+    # Same guard as fig_lineage_sizes: an all-blank grid is worse than no output,
+    # because _save overwrites whatever was there.
+    # The per-panel branch below blanks a panel when the label/genome CSVs are
+    # absent, and _save then overwrites a good figure with an empty grid — the
+    # exact failure this guard exists to prevent, so it has to test the label
+    # files too, not just the cluster assignments.
+    def _panel_has_data(org):
+        if _clusters(data, org) is None:
+            return False
+        sub = ms[ms.organism == org]
+        if sub.empty:
+            return False
+        ab = sub.sort_values(["n_genomes", "antibiotic"],
+                             ascending=[False, True]).iloc[0]["antibiotic"]
+        gdir = Path(data) / org / ab / "matrix_unitig"
+        return (gdir / f"genomes_{ab}.csv").exists() and (gdir / f"y_{ab}.csv").exists()
+
+    if not any(_panel_has_data(org) for org in orgs):
+        print("  (lineage resistance: no genomes_*/y_* CSVs — skipped, existing figure kept)")
+        return
+    if all(_clusters(data, org) is None for org in orgs):
+        print("  (lineage resistance: no PopPUNK cluster files under "
+              f"{data} — skipped, existing figure left untouched)")
+        return
     fig, axes = _grid(len(orgs), ncols=3, w=4.6, h=3.4)
     for ax, org in zip(axes, orgs):
         cl = _clusters(data, org)
@@ -262,7 +316,9 @@ def fig_lineage_resistance(data, ms, orgs, out):
         if cl is None or sub.empty:
             ax.axis("off"); continue
         # the organism's largest model = the most representative phenotype
-        ab = sub.sort_values("n_genomes", ascending=False).iloc[0]["antibiotic"]
+        # Deterministic pick when two antibiotics have the same genome count.
+        ab = sub.sort_values(["n_genomes", "antibiotic"],
+                             ascending=[False, True]).iloc[0]["antibiotic"]
         gdir = Path(data) / org / ab / "matrix_unitig"
         gf, yf = gdir / f"genomes_{ab}.csv", gdir / f"y_{ab}.csv"
         if not (gf.exists() and yf.exists()):
@@ -331,6 +387,93 @@ def fig_clonality_vs_inflation(data, tables, orgs, out):
 
 
 # ----------------------------------------------------------------- C1 / C2
+MEASURE_LABELS = [
+    ("clonality_pct",        "largest lineage (% of genomes)"),
+    ("simpson_diversity",    "Simpson diversity of lineages"),
+    ("shannon_diversity",    "Shannon diversity of lineages"),
+    ("n_lineages",           "number of PopPUNK lineages"),
+    ("n_singleton_lineages", "singleton lineages"),
+]
+
+
+def fig_structure_vs_inflation(tables, out):
+    """All five structure measures against CV inflation -- deliberately all five.
+
+    Figure 17 plots one measure, largest-lineage share, and reports r and rho beside it.
+    That is the measure the production run happened to pick, and it is significant under
+    Pearson (r +0.914, p 0.011) but NOT under Spearman (rho +0.771, p 0.072). Simpson
+    diversity is significant under both (r -0.944 p 0.005, rho -0.829 p 0.042).
+
+    Publishing Simpson alone would be selection on the outcome: five measures, six
+    organisms, no pre-registration. So this figure shows the whole set, marks which
+    survive a rank test, and says the count out loud in the title. A reader can then see
+    that the direction is consistent across every measure -- more clonal, more inflation
+    -- while no single p-value here carries weight on its own.
+
+    Reads lineage_summary.csv / lineage_summary_stats.json so the figure and the table
+    can never disagree; kb_tables_thesis.py computes both.
+    """
+    tf, sf = Path(tables) / "lineage_summary.csv", Path(tables) / "lineage_summary_stats.json"
+    if not tf.exists():
+        print("  (structure: lineage_summary.csv missing — run kb_tables_thesis.py — skipped)")
+        return
+    d = pd.read_csv(tf)
+    stats = json.loads(sf.read_text()) if sf.exists() else {"correlations": {}}
+    cor = stats.get("correlations", {})
+
+    fig, axes = _grid(6, ncols=3, w=4.5, h=3.6)
+    n_sig = 0
+    for ax, (col, lab) in zip(axes, MEASURE_LABELS):
+        if col not in d.columns:
+            ax.axis("off"); continue
+        x, y = d[col].to_numpy(float), d["mean_inflation"].to_numpy(float)
+        for _, t in d.iterrows():
+            ax.scatter(t[col], t["mean_inflation"], s=95, zorder=3,
+                       color=_colour(t["organism"]), edgecolor="k", lw=0.5)
+            ax.annotate(_abbr(t["organism"]), (t[col], t["mean_inflation"]),
+                        textcoords="offset points", xytext=(6, 4), fontsize=8)
+        if len(x) > 2:
+            ax.plot(np.sort(x), np.polyval(np.polyfit(x, y, 1), np.sort(x)),
+                    ls="--", c="grey", lw=1, zorder=1)
+        c = cor.get(col)
+        if c:
+            sig = c["spearman_p"] < 0.05
+            n_sig += bool(sig)
+            ax.set_title(
+                f"r = {c['pearson_r']:+.3f} (p {c['pearson_p']:.3f})\n"
+                f"rho = {c['spearman_rho']:+.3f} (p {c['spearman_p']:.3f})"
+                + ("  \u2713 rank test" if sig else ""),
+                fontsize=9, color="#238b45" if sig else "#444444")
+        ax.set_xlabel(lab, fontsize=9)
+        ax.set_ylabel("mean AUC inflation", fontsize=9)
+        ax.margins(x=0.18, y=0.22)
+        ax.tick_params(labelsize=8)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+
+    ax = axes[5]
+    ax.axis("off")
+    ax.text(0.0, 0.98,
+            "Why all five are shown\n\n"
+            f"n = {len(d)} organisms. Five measures were tested against the same target "
+            "without pre-registration, so the best p-value among them is not evidence.\n\n"
+            "Only Simpson diversity survives a rank test; largest-lineage share, the "
+            "measure figure 17 plots, does not (p 0.072).\n\n"
+            "What is robust is the direction, which every measure agrees on: the less "
+            "diverse the population, the more a lineage-blind split flatters the model.\n\n"
+            "Report this as a trend, not an estimate.",
+            transform=ax.transAxes, fontsize=8.6, va="top", ha="left", wrap=True,
+            bbox=dict(boxstyle="round,pad=0.6", fc="#f7f7f7", ec="#cccccc", lw=0.8))
+
+    fig.suptitle(
+        "Population structure vs cross-validation inflation — five measures, all reported\n"
+        f"{n_sig} of {len(MEASURE_LABELS)} reach p < 0.05 under Spearman; with n = {len(d)} "
+        "and five measures tried, treat the direction as the finding, not the coefficients",
+        fontsize=11.5)
+    fig.tight_layout(rect=[0, 0, 1, 0.90])
+    _save(fig, out, "40_structure_vs_inflation")
+
+
 def fig_feature_counts(db, ms, out):
     """Unitigs retained per model (post support-filter) — the feature space size."""
     if not Path(db).exists():
@@ -358,21 +501,32 @@ def fig_feature_counts(db, ms, out):
 
 
 def fig_unitig_lengths(data, ms, out, sample=40000, stride=25):
-    """Unitig length distribution — why 'blastn-short' is the right BLAST task."""
+    """Unitig length distribution — why 'blastn-short' is the right BLAST task.
+
+    Prefers the full features.txt. Where only ``features_sample.txt`` is present
+    — the systematic 1-in-25 extract taken on the HPC because the full feature
+    files total ~3.8 GB — that file is read with stride 1, since it has already
+    been strided. The sampling is stated on the figure so the two cases are not
+    confused.
+    """
     fig, ax = plt.subplots(figsize=(8.5, 4.8))
-    drawn, all_lens = 0, []
+    drawn, all_lens, from_sample = 0, [], False
     for org, g in ms.groupby("organism"):
         lens = []
         for r in g.itertuples():
-            f = Path(data) / r.organism / r.antibiotic / "matrix_unitig" / "features.txt"
+            mdir = Path(data) / r.organism / r.antibiotic / "matrix_unitig"
+            f, step = mdir / "features.txt", stride
             if not f.exists():
-                continue
+                f, step = mdir / "features_sample.txt", 1   # already 1-in-25
+                if not f.exists():
+                    continue
+                from_sample = True
             # Stride through the file instead of reading its head: features.txt is
             # written in matrix-column order, so the first N lines are one contiguous
             # slice of the feature space, not a sample of it.
             with open(f, encoding="utf-8", errors="replace") as fh:
                 for i, line in enumerate(fh):
-                    if i % stride:
+                    if i % step:
                         continue
                     lens.append(len(line.split("\t")[0]))
                     if len(lens) >= sample:
@@ -385,11 +539,12 @@ def fig_unitig_lengths(data, ms, out, sample=40000, stride=25):
                 density=True, color=_colour(org), label=f"{_display(org)} (n={len(lens):,})")
         drawn += 1
     if not drawn:
-        plt.close(fig); print("  (lengths: no features.txt — skipped)"); return
+        plt.close(fig); print("  (lengths: no features.txt/features_sample.txt — skipped)"); return
     hi = float(np.percentile(all_lens, 99.5)) if all_lens else 120
     ax.set_xlim(min(all_lens) - 2, max(35, hi) + 5)
     ax.set_xlabel("unitig length (bp)"); ax.set_ylabel("density")
-    ax.set_title("Unitig length distribution (sampled)\n"
+    src = "systematic 1-in-25 sample" if from_sample else "1-in-%d sample" % stride
+    ax.set_title(f"Unitig length distribution ({src})\n"
                  "short unitigs are why BLAST runs in 'blastn-short' mode", fontsize=10.5)
     ax.legend(fontsize=8, frameon=False)
     fig.tight_layout()
@@ -420,6 +575,7 @@ def main():
         ("lineage",     lambda: fig_lineage_sizes(args.data, orgs, out)),
         ("resistance",  lambda: fig_lineage_resistance(args.data, ms, orgs, out)),
         ("clonality",   lambda: fig_clonality_vs_inflation(args.data, args.tables, orgs, out)),
+        ("structure",   lambda: fig_structure_vs_inflation(args.tables, out)),
         ("features",    lambda: fig_feature_counts(args.db, ms, out)),
         ("lengths",     lambda: fig_unitig_lengths(args.data, ms, out)),
     ]

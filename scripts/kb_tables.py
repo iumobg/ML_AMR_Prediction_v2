@@ -30,14 +30,39 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 # CARD aro_drug_class keyword(s) that count as ON-TARGET for a registry class.
+# Drug class -> the ARO drug-class keywords that make a gene "on-target" for it.
+#
+# MUST cover every class in config/registry/organisms.yaml. A missing key silently
+# yields on_target=None, which drops the model from mechanisms.csv's on-target view
+# and from figure 04 — the panel curation split the old catch-all
+# `beta_lactams_carbapenems_others` into `carbapenems` + `monobactams` and added six
+# more classes, and until this map caught up figure 04 was hiding K. pneumoniae
+# KPC/NDM and the whole E. faecium vanA cluster, i.e. two of the four biology
+# headlines. `test_class_keyword_map_covers_registry` now fails if a class is added
+# without a keyword here.
 CLASS_TO_ARO_KEYWORD = {
     "penicillins": ("penam", "penicillin"),
     "cephalosporins": ("cephalosporin", "cephamycin"),
-    "beta_lactams_carbapenems_others": ("carbapenem", "monobactam"),
+    "carbapenems": ("carbapenem",),
+    "monobactams": ("monobactam",),
     "quinolones": ("fluoroquinolone", "quinolone"),
     "aminoglycosides": ("aminoglycoside",),
     "tetracyclines": ("tetracycline",),
+    "glycylcyclines": ("glycylcycline", "tetracycline"),  # tigecycline: a tetracycline derivative
+    "glycopeptides": ("glycopeptide",),
+    "macrolides": ("macrolide",),
+    "lincosamides": ("lincosamide",),
+    "phenicols": ("phenicol",),
+    "polymyxins": ("peptide antibiotic", "polymyxin"),  # ARO files colistin under peptide antibiotic
     "folate_pathway_inhibitors": ("sulfonamide", "diaminopyrimidine"),
+    # No model in the delivered 45-model panel falls in these five, but the registry
+    # declares them, so they are mapped now rather than after a future run silently
+    # drops them the way carbapenems and glycopeptides were dropped.
+    "oxazolidinones": ("oxazolidinone",),
+    "rifamycins": ("rifamycin",),
+    "fosfomycins": ("fosfomycin",),
+    "lipopeptides": ("lipopeptide",),
+    "nitrofurans": ("nitrofuran",),
 }
 
 
@@ -97,7 +122,15 @@ def main():
             random_seed=pr["random_seed"] if pr else None,
             card_version=pr["card_version"] if pr else None, run_id=rid,
         ))
-        n_stable = c.execute("SELECT COUNT(*) FROM unitig_model_scores WHERE model_id=? AND stable=1", (mid,)).fetchone()[0]
+        # `stable=1` is set by two selection methods: CPSS and the gain_seed pass.
+        # The column is named cpss_n_stable and figure 02 labels its axis "CPSS
+        # stable unitigs", so it must count CPSS only — without the filter it also
+        # picked up 856 gain_seed rows across the panel. DISTINCT because
+        # unitig_model_scores can hold the same (unitig, model) by two routes.
+        n_stable = c.execute(
+            "SELECT COUNT(*) FROM (SELECT DISTINCT unitig_id, model_id"
+            "  FROM unitig_model_scores"
+            "  WHERE model_id=? AND stable=1 AND selection_method='cpss')", (mid,)).fetchone()[0]
         n_conf = c.execute("SELECT COUNT(*) FROM blast_annotations WHERE model_id=? AND tier='confirmed'", (mid,)).fetchone()[0]
         n_pysig = c.execute("SELECT COUNT(*) FROM validation_evidence WHERE evidence_type='pyseer_lmm' AND evidence_score<=0.05 AND pipeline_run_id=?", (rid,)).fetchone()[0]
         n_rsnp = c.execute("SELECT COUNT(*) FROM variant_snp_check WHERE model_id=? AND allele_class='resistant_allele'", (mid,)).fetchone()[0]

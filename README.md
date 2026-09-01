@@ -6,6 +6,7 @@
 ![Tests](https://img.shields.io/badge/tests-pytest-green.svg)
 ![Lint](https://img.shields.io/badge/lint-ruff-261230.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21789464.svg)](https://doi.org/10.5281/zenodo.21789464)
 
 ## Abstract
 
@@ -178,7 +179,7 @@ a clone-specific pattern and collapses when that clone is held out. A random spl
 would have published a near-perfect headline for a phenotype the features cannot
 actually generalise to.
 
-**Evidence tiers across the KB:** confirmed 349 · candidate 942 · weak 1920 ·
+**Evidence tiers across the KB:** confirmed 349 · candidate 947 · weak 1915 ·
 none 337 · **`strong_novel` 23** (CPSS-stable + pyseer-significant + no CARD hit).
 
 Validation stack: lineage-aware CV, CPSS stability selection + PFER bound,
@@ -322,6 +323,19 @@ make lint                          # ruff
 make test                          # unit + smoke
 python scripts/run_pipeline.py --list                         # show the step plan
 python scripts/run_pipeline.py --organism ecoli --antibiotic ampicillin   # run the analysis core 01->10
+make tables                        # tidy thesis tables from the KB (+ H3, CV comparison, novel context)
+make figures                       # every thesis figure (runs `make tables` first)
+```
+
+Build the thesis artefacts through `make`, not by calling the figure scripts in a
+loop: each takes a different set of flags (`kb_figures_model.py` has no `--db`), so a
+loop that passes one set to all of them makes argparse exit while still looking like it
+succeeded. Override the paths when the results live elsewhere, e.g. on the HPC:
+
+```bash
+make figures KB=$AMR_WORK/results/kb/amrk.db RESULTS=$AMR_WORK/results \
+             TABLES=$AMR_WORK/results/tables FIGURES=$AMR_WORK/results/figures \
+             PYTHON="apptainer exec --no-home $AMR_WORK/containers/amr.sif /opt/amr-env/bin/python"
 ```
 
 CI (GitHub Actions, `.github/workflows/ci.yml`) runs ruff + the unit/smoke suite on Python 3.10–3.12.
@@ -363,8 +377,9 @@ to the latest version; each version also gets its own DOI). The DOI is stored in
 `kb_metadata.zenodo_doi` and mirrored in [`CITATION.cff`](CITATION.cff) /
 [`.zenodo.json`](.zenodo.json).
 
-> **Zenodo DOI:** _reserved — added on first deposit_ (see
-> [`docs/RELEASE_ZENODO.md`](docs/RELEASE_ZENODO.md)).
+> **Zenodo DOI:** [`10.5281/zenodo.21789464`](https://doi.org/10.5281/zenodo.21789464) — the archived knowledge base
+> (KB + evidence tables + figures + run metadata). The concept DOI always resolves to
+> the latest version; see [`docs/RELEASE_ZENODO.md`](docs/RELEASE_ZENODO.md).
 
 Raw genome assemblies come from [BV-BRC](https://www.bv-brc.org); resistance
 gene annotations from [CARD](https://card.mcmaster.ca) (the exact snapshot is
